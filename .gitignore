@@ -3,3 +3,4 @@
 extension.wasm
 .DS_Store
 *.wasm
+/tests/fixtures/lean/.lake/

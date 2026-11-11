@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add wasm32-wasip2 && rustup component add rustfmt clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # Root package only, as Zed's builder does; works before and after the rename.
+      - run: cargo build --release --target wasm32-wasip2
+
+  queries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          gh release download v3.15.1 --repo ribru17/ts_query_ls --pattern ts_query_ls-x86_64-unknown-linux-gnu.tar.gz
+          tar -xf ts_query_ls-x86_64-unknown-linux-gnu.tar.gz
+          ./ts_query_ls format --check languages
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  zed-extension:
+    runs-on: ubuntu-latest
+    env:
+      # Same pin as zed-industries/zed .github/workflows/extension_tests.yml on 2026-11-11.
+      ZED_EXTENSION_CLI_SHA: 9ee3c503a4bbbc6b4a0f8a789acca4871d773223
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add wasm32-wasip2
+      - run: |
+          wget -q "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O zed-extension
+          chmod +x zed-extension
+          mkdir -p /tmp/ext-scratch /tmp/ext-output
+          ./zed-extension --source-dir . --scratch-dir /tmp/ext-scratch --output-dir /tmp/ext-output

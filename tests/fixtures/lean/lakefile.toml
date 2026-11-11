@@ -1,0 +1,4 @@
+name = "fixture"
+
+[[lean_lib]]
+name = "Fixture"
