@@ -70,9 +70,60 @@ Setting `binary` bypasses the proxy (and so the goal-in-hover feature); omit it 
 
 ## TODO list
 
-- Implement infoview like [VSCode](https://github.com/leanprover/vscode-lean4) and [Neovim](https://github.com/Julian/lean.nvim) with Rust
-- Tree-sitter-lean is experimental now and needs improvement
-- Update and uninstall _elan_
+Compared against [vscode-lean4](https://github.com/leanprover/vscode-lean4), the reference
+editor integration. Zed extensions cannot draw panels or send custom LSP requests, so the
+plan is a Rust LSP proxy between Zed and `lake serve` that serves the official
+[`@leanprover/infoview`](https://www.npmjs.com/package/@leanprover/infoview) in a browser
+window. Items marked (proxy) depend on it.
+
+### Infoview (proxy)
+
+- [x] Goal state at the cursor in hover, via `$/lean/plainGoal`
+- [ ] Browser infoview following the editor cursor
+- [ ] Tactic goals with hypotheses, case names and goal diffs
+- [ ] Expected type (term goal)
+- [ ] Messages at the cursor and an All Messages view
+- [ ] Hypothesis filters: hide types, instances, inaccessible names, let values; reverse order
+- [ ] Pin and pause
+- [ ] Hover inside goals and go to definition from the infoview
+- [ ] User widgets (ProofWidgets, `@[widget_module]`, panel widgets)
+- [ ] "Try this" suggestions and copy-to-comment, applied back to the Zed buffer
+- [ ] Trace explorer with lazy expansion and search
+- [ ] File progress (elaboration status) and Restart File
+- [ ] Clear status when the server stops or restarts
+
+### Editing
+
+- [ ] Unicode input that behaves like VS Code (`\alpha` then space or tab), instead of snippets
+- [ ] Abbreviation hover and a symbol picker
+- [ ] Unsolved-goals and goals-accomplished markers
+- [ ] Fold and unfold all proofs
+- [ ] Module hierarchy: imports and imported-by
+- [ ] Semantic token highlighting on by default for Lean files
+- [ ] Prompt to restart a file when its imports are stale (`$/lean/staleDependency`)
+
+### Toolchain and projects
+
+- [ ] Update and uninstall _elan_
+- [ ] Select the default and per-project toolchain
+- [ ] Lake commands: build, clean, update dependency
+- [ ] Fetch the Mathlib cache (`lake exe cache get`)
+- [ ] New standalone or Mathlib project
+- [ ] Setup diagnostics with actionable errors (missing elan or lake, unsupported Lean version)
+
+### Search and docs
+
+- [ ] Loogle search
+- [ ] Abbreviation reference
+
+### Quality
+
+- [x] Rust unit tests for the extension's server resolution
+- [x] Integration tests for the proxy against a scripted fake server and a pinned real Lean
+- [x] CI: fmt, clippy, tests, `zed-extension` check, tree-sitter query lint
+- [ ] Release workflow publishing proxy binaries for macOS, Linux and Windows
+- [ ] Tree-sitter-lean is experimental and needs improvement, plus highlight fixture tests
+- [ ] Narrow the `process:exec` capability from `*` to the commands actually run
 
 ## Development
 
