@@ -17,7 +17,10 @@
 
 (declaration
   (theorem
-    ["theorem" "lemma"] @context
+    [
+      "theorem"
+      "lemma"
+    ] @context
     name: (identifier) @name)) @item
 
 (declaration
@@ -53,7 +56,10 @@
 
 (declaration
   (structure
-    ["structure" "class"] @context
+    [
+      "structure"
+      "class"
+    ] @context
     name: (identifier) @name)) @item
 
 (declaration
@@ -63,12 +69,18 @@
     name: (identifier) @name)) @item
 
 (initialize
-  ["initialize" "builtin_initialize"] @context
+  [
+    "initialize"
+    "builtin_initialize"
+  ] @context
   name: (identifier) @name) @item
 
 (alias_cmd
   "alias" @context
-  name: [(identifier) (anon_ctor)] @name) @item
+  name: [
+    (identifier)
+    (anon_ctor)
+  ] @name) @item
 
 (where_aux_def
   name: (identifier) @name) @item

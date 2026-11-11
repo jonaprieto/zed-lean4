@@ -27,7 +27,12 @@
 (declaration
   (_
     (match_alt) @function.inside
-    [(match_alt) (line_comment) (block_comment) (doc_comment)]* @function.inside
+    [
+      (match_alt)
+      (line_comment)
+      (block_comment)
+      (doc_comment)
+    ]* @function.inside
     (where_decls)? @function.inside))
 
 ; A structure-valued definition or instance has fields after where.
@@ -35,7 +40,12 @@
   (_
     (where_struct
       (struct_field) @function.inside
-      [(struct_field) (line_comment) (block_comment) (doc_comment)]* @function.inside)
+      [
+        (struct_field)
+        (line_comment)
+        (block_comment)
+        (doc_comment)
+      ]* @function.inside)
     (where_decls)? @function.inside))
 
 (where_aux_def
@@ -43,15 +53,27 @@
 
 (where_aux_def
   (match_alt) @function.inside
-  [(match_alt) (line_comment) (block_comment) (doc_comment)]* @function.inside)
+  [
+    (match_alt)
+    (line_comment)
+    (block_comment)
+    (doc_comment)
+  ]* @function.inside)
 
 (initialize
-  [":=" "←" "<-"]
+  [
+    ":="
+    "←"
+    "<-"
+  ]
   (_)+ @function.inside)
 
 (initialize
   !name
-  ["initialize" "builtin_initialize"]
+  [
+    "initialize"
+    "builtin_initialize"
+  ]
   (_)+ @function.inside)
 
 (declaration
@@ -63,15 +85,25 @@
 ; Zed combines repeated captures from one match into the members' full range.
 (structure
   "where"
-  [(ctor) (field) (line_comment) (block_comment) (doc_comment)]+ @class.inside)
+  [
+    (ctor)
+    (field)
+    (line_comment)
+    (block_comment)
+    (doc_comment)
+  ]+ @class.inside)
 
 (inductive
   (ctor_alt) @class.inside
-  [(ctor_alt) (line_comment) (block_comment) (doc_comment)]* @class.inside)
+  [
+    (ctor_alt)
+    (line_comment)
+    (block_comment)
+    (doc_comment)
+  ]* @class.inside)
 
 ; namespace/section/end are flat sibling commands in this grammar, so their
 ; header nodes cannot provide an enclosing class object.
-
 ; A single-line object cannot accidentally span comments separated by blanks.
 (line_comment) @comment.around
 

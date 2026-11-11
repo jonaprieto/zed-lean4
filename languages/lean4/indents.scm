@@ -33,26 +33,46 @@
   "with" @start) @indent
 
 (match_alt
-  ["=>" "↦"] @start) @indent
+  [
+    "=>"
+    "↦"
+  ] @start) @indent
 
 (tactic_case
   "=>" @start) @indent
 
 (fun
-  ["=>" "↦"] @start) @indent
+  [
+    "=>"
+    "↦"
+  ] @start) @indent
 
 [
-  (forall "," @start)
-  (exists "," @start)
-  (sigma "," @start)
-  (big_op_binder "," @start)
+  (forall
+    "," @start)
+  (exists
+    "," @start)
+  (sigma
+    "," @start)
+  (big_op_binder
+    "," @start)
 ] @indent
 
 [
-  (let [":=" "←" "<-"] @start ";"? @end)
-  (have ":=" @start ";"? @end)
-  (suffices "from" @start)
-  (show "from" @start)
+  (let
+    [
+      ":="
+      "←"
+      "<-"
+    ] @start
+    ";"? @end)
+  (have
+    ":=" @start
+    ";"? @end)
+  (suffices
+    "from" @start)
+  (show
+    "from" @start)
 ] @indent
 
 (induction
@@ -60,8 +80,10 @@
 
 ; Treat the two branches as separate ranges so `else` aligns with `if`.
 (if_then_else) @start.if
+
 ; The complete node may disappear while its final branch is being entered.
-(ERROR "if" @start.if)
+(ERROR
+  "if" @start.if)
 
 (if_then_else
   "then" @start
