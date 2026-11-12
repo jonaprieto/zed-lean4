@@ -22,6 +22,10 @@ lean --version
 
 - For optimal highlighting, set `"semantic_tokens"` to `"combined"`, which will enable LSP semantic tokens highlight in Zed.
 
+### Goal in hover
+
+Hovering inside a tactic proof shows the goal state below the usual hover text. Disable the proxy with `lsp.lean4-ide.settings.proxy: false`.
+
 ### Abbreviation
 
 - Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
