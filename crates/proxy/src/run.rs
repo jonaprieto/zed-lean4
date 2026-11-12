@@ -1,6 +1,6 @@
-//! The tokio shell around `Router`: two reader tasks feed one loop that writes.
-use crate::codec;
-use crate::router::{Action, Event, Router};
+//! I/O shell: LSP framing, browser transport, and a clock around the sans-IO Router.
+use crate::router::{Action, Event, KEEPALIVE, Router};
+use crate::{codec, server::Bridge};
 use anyhow::Result;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
@@ -11,12 +11,12 @@ enum Input {
     Closed(&'static str),
 }
 
-/// Proxies until either side closes its stream.
 pub async fn run<CI, CO, SI, SO>(
     client_in: CI,
     mut client_out: CO,
     server_in: SI,
     mut server_out: SO,
+    mut bridge: Option<Bridge>,
 ) -> Result<()>
 where
     CI: AsyncRead + Unpin + Send + 'static,
@@ -25,27 +25,54 @@ where
     SO: AsyncWrite + Unpin + Send + 'static,
 {
     let (tx, mut rx) = unbounded_channel();
-    spawn_reader(client_in, tx.clone(), Event::FromClient, "client");
-    spawn_reader(server_in, tx, Event::FromServer, "server");
-    let mut router = Router::default();
-    while let Some(input) = rx.recv().await {
-        let event = match input {
-            Input::Msg(event) => event,
-            Input::Closed(side) => {
-                tracing::info!("{side} closed its stream");
-                break;
-            }
-        };
-        for action in router.handle(event) {
-            match action {
-                // Browser transport is not wired yet.
-                Action::ToBrowser(_) => {}
-                Action::ToClient(m) => codec::write(&mut client_out, &m).await?,
-                Action::ToServer(m) => codec::write(&mut server_out, &m).await?,
+    let readers = [
+        spawn_reader(client_in, tx.clone(), Event::FromClient, "client"),
+        spawn_reader(server_in, tx, Event::FromServer, "server"),
+    ];
+    let mut router = Router::new(bridge.as_ref().map(|b| b.page_url.clone()));
+    let mut clock = tokio::time::interval(KEEPALIVE);
+    let result = async {
+        loop {
+            let input = tokio::select! {
+                input = rx.recv() => input,
+                page = async {
+                    match bridge.as_mut() {
+                        Some(bridge) => bridge.incoming.recv().await,
+                        None => std::future::pending::<Option<Event>>().await,
+                    }
+                } => match page {
+                    Some(page) => Some(Input::Msg(page)),
+                    None => { bridge = None; continue; }
+                },
+                _ = clock.tick() => Some(Input::Msg(Event::Tick)),
+            };
+            let event = match input {
+                Some(Input::Msg(event)) => event,
+                Some(Input::Closed(side)) => {
+                    tracing::info!("{side} closed its stream");
+                    break;
+                }
+                None => break,
+            };
+            for action in router.handle(event) {
+                match action {
+                    Action::ToClient(m) => codec::write(&mut client_out, &m).await?,
+                    Action::ToServer(m) => codec::write(&mut server_out, &m).await?,
+                    Action::ToBrowser(m) => {
+                        if let Some(bridge) = &bridge {
+                            let _ = bridge.outgoing.send(m);
+                        }
+                    }
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
+    .await;
+    for reader in readers {
+        reader.abort();
+    }
+    result
 }
 
 fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
@@ -53,7 +80,7 @@ fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
     tx: UnboundedSender<Input>,
     wrap: fn(Value) -> Event,
     side: &'static str,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut r = BufReader::new(r);
         loop {
@@ -71,5 +98,5 @@ fn spawn_reader<R: AsyncRead + Unpin + Send + 'static>(
             }
         }
         let _ = tx.send(Input::Closed(side));
-    });
+    })
 }

@@ -8,7 +8,7 @@ async fn forwards_both_ways_and_stops_when_zed_closes() {
     let (lean, proxy_server) = duplex(1 << 16);
     let (pc_r, pc_w) = split(proxy_client);
     let (ps_r, ps_w) = split(proxy_server);
-    let proxy = tokio::spawn(run(pc_r, pc_w, ps_r, ps_w));
+    let proxy = tokio::spawn(run(pc_r, pc_w, ps_r, ps_w, None));
 
     let (zed_r, mut zed_w) = split(zed);
     let (lean_r, mut lean_w) = split(lean);

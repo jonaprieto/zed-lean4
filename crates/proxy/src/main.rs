@@ -34,11 +34,19 @@ async fn serve() -> Result<i32> {
         .with_context(|| format!("starting {cmd:?}"))?;
     let server_in = child.stdout.take().context("server stdout")?;
     let server_out = child.stdin.take().context("server stdin")?;
+    let bridge = match lean4_ide_proxy::server::Bridge::bind().await {
+        Ok(bridge) => Some(bridge),
+        Err(error) => {
+            tracing::warn!("infoview unavailable: {error:#}");
+            None
+        }
+    };
     lean4_ide_proxy::run(
         tokio::io::stdin(),
         tokio::io::stdout(),
         server_in,
         server_out,
+        bridge,
     )
     .await?;
     // Dropping our end of the server's stdin (inside run) makes `lake serve` exit.
