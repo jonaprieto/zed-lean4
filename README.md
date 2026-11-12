@@ -26,6 +26,26 @@ lean --version
 
 Hovering inside a tactic proof shows the goal state below the usual hover text. Disable the proxy with `lsp.lean4-ide.settings.proxy: false`.
 
+### Browser infoview
+
+In a Lean file, choose Open Lean Infoview from Zed's code actions. The official
+Lean infoview opens in your browser, follows the Zed cursor and shows the goals
+and messages there. Edits and locations the infoview asks for (copy to comment,
+suggestions, go to definition) are sent back to Zed; see the TODO list below for
+what has been checked so far.
+
+The proxy serves the page on a random loopback port; the socket needs the token
+in the URL. Anyone with the URL can read the open Lean files and edit them
+through Zed, so keep it private. Lean widgets run inside the page with the same
+access, so only open trusted projects.
+For now, Restart File is a logged no-op, remote worktrees are unsupported, and a
+proxy restart requires reopening the page and resets preferences for the new port.
+
+For development, build with `cargo build -p lean4-ide-proxy`, set
+`lsp.lean4-ide.settings.proxy_path` to the absolute binary path, and restart the
+language server. Setting `lsp.lean4-ide.settings.proxy: false` or an explicit
+`lsp.lean4-ide.binary` bypasses the proxy.
+
 ### Abbreviation
 
 - Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
@@ -66,7 +86,7 @@ The extension runs `lake serve` behind `lean4-ide-proxy`. It looks for the proxy
 }
 ```
 
-Setting `binary` bypasses the proxy (and so the goal-in-hover feature); omit it to use the proxy.
+Setting `binary` bypasses the proxy, including hover goals and the browser infoview; omit it to use the proxy.
 
 ## TODO list
 
@@ -79,7 +99,7 @@ window. Items marked (proxy) depend on it.
 ### Infoview (proxy)
 
 - [x] Goal state at the cursor in hover, via `$/lean/plainGoal`
-- [ ] Browser infoview following the editor cursor
+- [x] Browser infoview following the editor cursor
 - [ ] Tactic goals with hypotheses, case names and goal diffs
 - [ ] Expected type (term goal)
 - [ ] Messages at the cursor and an All Messages view
