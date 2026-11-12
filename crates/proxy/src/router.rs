@@ -1,7 +1,7 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
 use crate::{bridge, cursor, hover, init, msg};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
@@ -34,6 +34,8 @@ pub enum Action {
 #[derive(Default)]
 pub struct Router {
     next_id: u64,
+    page_url: Option<String>,
+    code_actions: HashSet<String>,
     sessions: HashMap<String, Session>,
     location: Option<Value>,
     initialize_id: Option<String>,
@@ -46,6 +48,9 @@ pub struct Router {
 }
 
 enum Pending {
+    Open {
+        id: Value,
+    },
     Client {
         id: String,
     },
@@ -73,6 +78,13 @@ struct HoverJoin {
 }
 
 impl Router {
+    pub fn new(page_url: Option<String>) -> Self {
+        Self {
+            page_url,
+            ..Self::default()
+        }
+    }
+
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::Tick => self.tick(),
@@ -142,7 +154,47 @@ impl Router {
     }
 
     fn client_message(&mut self, m: Value) -> Vec<Action> {
+        if msg::is_request(&m)
+            && let Some(url) = &self.page_url
+        {
+            if msg::method(&m) == Some("textDocument/codeAction")
+                && m["params"]["context"].get("only").is_none()
+            {
+                self.code_actions.insert(msg::id_key(&m["id"]));
+            }
+            if msg::method(&m) == Some("workspace/executeCommand")
+                && m["params"]["command"] == init::OPEN_COMMAND
+            {
+                let params = json!({"uri":url,"external":true});
+                let id = self.proxy_id();
+                self.pending.insert(
+                    id.clone(),
+                    Pending::Open {
+                        id: m["id"].clone(),
+                    },
+                );
+                return vec![Action::ToClient(msg::request(
+                    &id,
+                    "window/showDocument",
+                    params,
+                ))];
+            }
+        }
         if let Some(own) = msg::proxy_response_id(&m) {
+            if matches!(self.pending.get(own), Some(Pending::Open { .. }))
+                && let Some(Pending::Open { id }) = self.pending.remove(own)
+            {
+                let mut response = json!({"jsonrpc":"2.0","id":id});
+                if let Some(error) = m.get("error") {
+                    response["error"] = error.clone();
+                } else if m["result"]["success"] == true {
+                    response["result"] = Value::Null;
+                } else {
+                    response["error"] =
+                        json!({"code":-32603,"message":"Zed did not open the infoview"});
+                }
+                return vec![Action::ToClient(response)];
+            }
             if matches!(self.pending.get(own), Some(Pending::Client { .. }))
                 && let Some(Pending::Client { id }) = self.pending.remove(own)
             {
@@ -178,9 +230,14 @@ impl Router {
         vec![Action::ToServer(m)]
     }
 
-    fn on_server(&mut self, m: Value) -> Vec<Action> {
+    fn on_server(&mut self, mut m: Value) -> Vec<Action> {
         if msg::is_response(&m) && self.initialize_id.as_ref() == Some(&msg::id_key(&m["id"])) {
             self.initialize_id = None;
+            if self.page_url.is_some()
+                && let Some(result) = m.get_mut("result")
+            {
+                init::advertise_command(result);
+            }
             self.initialize_result = m.get("result").filter(|v| v.is_object()).cloned();
         }
         if !msg::is_request(&m)
@@ -203,7 +260,10 @@ impl Router {
             return vec![Action::ToClient(m)];
         }
         if let Some(own) = msg::proxy_response_id(&m) {
-            if matches!(self.pending.get(own), Some(Pending::Client { .. })) {
+            if matches!(
+                self.pending.get(own),
+                Some(Pending::Client { .. } | Pending::Open { .. })
+            ) {
                 return vec![];
             }
             return match self.pending.remove(own) {
@@ -240,10 +300,13 @@ impl Router {
                     );
                     vec![Action::ToBrowser(bridge::reply(&id, sid.clone()))]
                 }
-                Some(Pending::Client { .. }) | None => vec![],
+                Some(Pending::Client { .. } | Pending::Open { .. }) | None => vec![],
             };
         }
         let key = msg::id_key(&m["id"]);
+        if self.code_actions.remove(&key) {
+            return vec![Action::ToClient(init::add_open_action(m))];
+        }
         match self.hovers.get_mut(&key) {
             Some(_) if m.get("error").is_some() => {
                 if let Some(join) = self.hovers.remove(&key) {
@@ -973,5 +1036,64 @@ mod edit_tests {
             )),
             vec![Action::ToBrowser(bridge::reply("a:3", Value::Null))]
         );
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    #[test]
+    fn advertises_injects_skips_save_and_opens_through_zed() {
+        let url = "http://127.0.0.1:1234/?token=abc";
+        let mut r = Router::new(Some(url.into()));
+        r.handle(Event::FromClient(
+            json!({"id":1,"method":"initialize","params":{}}),
+        ));
+        let out=r.handle(Event::FromServer(json!({"id":1,"result":{"capabilities":{"executeCommandProvider":{"commands":["existing"]}}}})));
+        let Action::ToClient(init) = &out[0] else {
+            panic!("initialize")
+        };
+        assert_eq!(
+            init["result"]["capabilities"]["executeCommandProvider"]["commands"],
+            json!(["existing", init::OPEN_COMMAND])
+        );
+        for only in [false, true] {
+            let mut request =
+                json!({"id":2,"method":"textDocument/codeAction","params":{"context":{}}});
+            if only {
+                request["params"]["context"]["only"] = json!([]);
+            }
+            r.handle(Event::FromClient(request));
+            let response = json!({"id":2,"result":null});
+            let out = r.handle(Event::FromServer(response.clone()));
+            let Action::ToClient(m) = &out[0] else {
+                panic!("actions")
+            };
+            if only {
+                assert_eq!(*m, response);
+            } else {
+                assert_eq!(m["result"][0]["command"]["command"], init::OPEN_COMMAND);
+                assert!(m["result"][0].get("data").is_none());
+            }
+        }
+        let out=r.handle(Event::FromClient(json!({"id":3,"method":"workspace/executeCommand","params":{"command":init::OPEN_COMMAND}})));
+        assert_eq!(
+            out,
+            vec![Action::ToClient(msg::request(
+                "lean4-ide:1",
+                "window/showDocument",
+                json!({"uri":url,"external":true})
+            ))]
+        );
+        assert_eq!(
+            r.handle(Event::FromClient(
+                json!({"id":"lean4-ide:1","result":{"success":true}})
+            )),
+            vec![Action::ToClient(
+                json!({"jsonrpc":"2.0","id":3,"result":null})
+            )]
+        );
+        assert!(r.pending.is_empty());
     }
 }
