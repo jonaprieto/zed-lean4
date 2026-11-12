@@ -3,6 +3,14 @@ use crate::{bridge, hover, init, msg};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+/// The file a notification is about: `uri` in diagnostics, `textDocument.uri`
+/// in Lean's file progress.
+fn notification_uri(params: &Value) -> Option<&str> {
+    params["uri"]
+        .as_str()
+        .or_else(|| params["textDocument"]["uri"].as_str())
+}
+
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
 pub enum Event {
@@ -22,6 +30,7 @@ pub enum Action {
 #[derive(Default)]
 pub struct Router {
     next_id: u64,
+    latest: HashMap<String, HashMap<String, Value>>,
     /// Proxy request id -> response destination.
     pending: HashMap<String, Pending>,
     /// Client hover id key -> parts received so far.
@@ -54,6 +63,25 @@ impl Router {
     }
 
     fn on_client(&mut self, m: Value) -> Vec<Action> {
+        if !msg::is_request(&m)
+            && let Some(method) = msg::method(&m)
+        {
+            if method == "textDocument/didClose"
+                && let Some(uri) = m["params"]["textDocument"]["uri"].as_str()
+            {
+                for values in self.latest.values_mut() {
+                    values.remove(uri);
+                }
+            }
+            let copy = bridge::event("sentClientNotification", json!([method, m["params"]]));
+            let mut out = self.client_message(m);
+            out.push(Action::ToBrowser(copy));
+            return out;
+        }
+        self.client_message(m)
+    }
+
+    fn client_message(&mut self, m: Value) -> Vec<Action> {
         if msg::proxy_response_id(&m).is_some() {
             return vec![];
         }
@@ -86,6 +114,22 @@ impl Router {
     }
 
     fn on_server(&mut self, m: Value) -> Vec<Action> {
+        if !msg::is_request(&m)
+            && let Some(method) = msg::method(&m)
+        {
+            if matches!(
+                method,
+                "textDocument/publishDiagnostics" | "$/lean/fileProgress"
+            ) && let Some(uri) = notification_uri(&m["params"])
+            {
+                self.latest
+                    .entry(method.into())
+                    .or_default()
+                    .insert(uri.into(), m["params"].clone());
+            }
+            let copy = bridge::event("gotServerNotification", json!([method, m["params"]]));
+            return vec![Action::ToClient(m), Action::ToBrowser(copy)];
+        }
         if !msg::is_response(&m) {
             return vec![Action::ToClient(m)];
         }
@@ -131,6 +175,15 @@ impl Router {
                 .unwrap_or_default();
         };
         match (call.name.as_str(), call.args.as_slice()) {
+            ("subscribeServerNotifications", [method]) if method.is_string() => {
+                let values: Vec<Value> = self
+                    .latest
+                    .get(method.as_str().unwrap())
+                    .into_iter()
+                    .flat_map(|values| values.values().cloned())
+                    .collect();
+                vec![Action::ToBrowser(bridge::reply(&call.id, json!(values)))]
+            }
             ("sendClientRequest", [uri, method, params])
                 if uri.is_string()
                     && method.is_string()
@@ -200,7 +253,13 @@ mod tests {
         );
         assert_eq!(
             r.handle(Event::FromServer(note.clone())),
-            vec![Action::ToClient(note)]
+            vec![
+                Action::ToClient(note),
+                Action::ToBrowser(bridge::event(
+                    "gotServerNotification",
+                    json!(["$/lean/fileProgress", {}])
+                ))
+            ]
         );
     }
 
@@ -354,6 +413,10 @@ mod tests {
             vec![
                 Action::ToServer(cancel(json!(7))),
                 Action::ToServer(cancel(json!("lean4-ide:1"))),
+                Action::ToBrowser(bridge::event(
+                    "sentClientNotification",
+                    json!(["$/cancelRequest", {"id":7}])
+                )),
             ]
         );
     }
@@ -364,7 +427,13 @@ mod tests {
         r.handle(Event::FromClient(hover_req(json!(7))));
         assert_eq!(
             r.handle(Event::FromClient(cancel(json!(9)))),
-            vec![Action::ToServer(cancel(json!(9)))]
+            vec![
+                Action::ToServer(cancel(json!(9))),
+                Action::ToBrowser(bridge::event(
+                    "sentClientNotification",
+                    json!(["$/cancelRequest", {"id":9}])
+                ))
+            ]
         );
     }
 
@@ -497,5 +566,52 @@ mod bridge_tests {
             assert!(matches!(out.as_slice(), [Action::ToBrowser(v)] if v.get("error").is_some()));
         }
         assert!(r.handle(Event::FromBrowser(1, json!([]))).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn latest_notifications_replay_and_close_forgets() {
+        let mut r = Router::default();
+        for method in ["textDocument/publishDiagnostics", "$/lean/fileProgress"] {
+            let params = |version: u64| match method {
+                "$/lean/fileProgress" => {
+                    json!({"textDocument":{"uri":"file:///F.lean","version":version},"processing":[]})
+                }
+                _ => json!({"uri":"file:///F.lean","version":version}),
+            };
+            for version in [1, 2] {
+                let params = params(version);
+                let m = msg::notification(method, params.clone());
+                assert_eq!(
+                    r.handle(Event::FromServer(m.clone())),
+                    vec![
+                        Action::ToClient(m),
+                        Action::ToBrowser(bridge::event(
+                            "gotServerNotification",
+                            json!([method, params])
+                        ))
+                    ]
+                );
+            }
+            assert_eq!(
+                r.handle(Event::FromBrowser(
+                    1,
+                    json!({"id":"a:1","call":"subscribeServerNotifications","args":[method]})
+                )),
+                vec![Action::ToBrowser(bridge::reply("a:1", json!([params(2)])))]
+            );
+        }
+        let m = msg::notification(
+            "textDocument/didClose",
+            json!({"textDocument":{"uri":"file:///F.lean"}}),
+        );
+        let out = r.handle(Event::FromClient(m.clone()));
+        assert_eq!(out[0], Action::ToServer(m));
+        assert!(matches!(&out[1],Action::ToBrowser(v) if v["event"]=="sentClientNotification"));
+        assert!(r.latest.values().all(HashMap::is_empty));
     }
 }
