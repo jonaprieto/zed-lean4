@@ -263,6 +263,9 @@ async fn tui_shows_goal_from_real_lean() {
         app::{App, Effect},
         socket_request,
     };
+    use ratatui::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     fn screen(app: &App) -> String {
@@ -291,16 +294,37 @@ async fn tui_shows_goal_from_real_lean() {
         let hello_id = format!("tui-{pid}:1");
         let mut effects = app.connected(url);
         let mut moved = false;
+        // Goals appear, a click on `Nat` shows its type, `d` opens its definition.
+        let mut clicked = false;
+        let mut asked = false;
         loop {
             for effect in effects.drain(..) {
                 let Effect::Send(m) = effect else {
                     panic!("unexpected effect {effect:?}")
                 };
+                if m["call"] == "showDocument" {
+                    let uri = m["args"][0]["uri"].as_str().unwrap();
+                    assert!(uri.ends_with("Init/Prelude.lean"), "{uri}");
+                    return;
+                }
                 socket.send(Message::text(m.to_string())).await.unwrap();
             }
             let text = screen(&app);
-            if text.contains("⊢ n + 0 = n") {
-                break;
+            if !clicked && text.contains("⊢ n + 0 = n") {
+                clicked = true;
+                let row = text.lines().position(|l| l.starts_with("n : Nat")).unwrap();
+                effects = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 4,
+                    row: row.try_into().unwrap(),
+                    modifiers: KeyModifiers::NONE,
+                });
+                continue;
+            }
+            if !asked && text.contains("Nat : Type") {
+                asked = true;
+                effects = app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+                continue;
             }
             let msg = socket.next().await.unwrap().unwrap();
             let m: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();

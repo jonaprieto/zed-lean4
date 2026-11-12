@@ -5,10 +5,36 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
+
+/// Characters `start..end` of a line show the subterm Lean knows as `info`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub start: usize,
+    pub end: usize,
+    pub info: Value,
+}
+
+/// A line and the subterms in it.
+#[derive(Default)]
+pub struct Text {
+    pub line: Line<'static>,
+    pub links: Vec<Link>,
+}
+
+impl From<Line<'static>> for Text {
+    fn from(line: Line<'static>) -> Self {
+        Self {
+            line,
+            links: Vec::new(),
+        }
+    }
+}
 
 pub struct Row {
     pub line: Line<'static>,
+    pub links: Vec<Link>,
     /// The innermost foldable block the row belongs to (its own key on a header).
     pub fold: Option<String>,
     pub header: bool,
@@ -33,11 +59,13 @@ impl<'a> Rows<'a> {
         }
     }
 
-    pub fn push(&mut self, line: Line<'static>) {
+    pub fn push(&mut self, text: impl Into<Text>) {
         if self.hidden.is_none() {
+            let Text { line, links } = text.into();
             let fold = self.open.last().cloned();
             self.rows.push(Row {
                 line,
+                links,
                 fold,
                 header: false,
             });
@@ -45,14 +73,21 @@ impl<'a> Rows<'a> {
     }
 
     /// Starts a block whose header is `label` with a fold marker.
-    pub fn open(&mut self, key: String, label: Line<'static>) {
+    pub fn open(&mut self, key: String, label: impl Into<Text>) {
         if self.hidden.is_none() {
             let folded = self.folded.contains(&key);
-            let mut line = label;
+            let Text {
+                mut line,
+                mut links,
+            } = label.into();
             line.spans
                 .insert(0, Span::raw(if folded { "▸ " } else { "▾ " }));
+            for link in &mut links {
+                (link.start, link.end) = (link.start + MARKER_WIDTH, link.end + MARKER_WIDTH);
+            }
             self.rows.push(Row {
                 line,
+                links,
                 fold: Some(key.clone()),
                 header: true,
             });
@@ -71,13 +106,38 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// Characters the `▾ `/`▸ ` fold marker adds before a header.
+pub const MARKER_WIDTH: usize = 2;
+
 pub const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+
+/// The character of `line` under column `col`, counting from character `start`.
+pub fn char_at(line: &Line, start: usize, col: usize) -> Option<usize> {
+    let mut used = 0;
+    for (i, c) in line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .enumerate()
+        .skip(start)
+    {
+        used += c.width().unwrap_or(0);
+        if used > col {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// A screen line: its text, the index of its first character in the row's
+/// line, and how many columns of indentation `wrap` put before it.
+pub type Wrapped = (Line<'static>, usize, usize);
 
 /// Wraps `line` to `width` columns, at a space when there is one, indenting
 /// continuations four columns past the line's own indentation.
-pub fn wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+pub fn wrap(line: Line<'static>, width: usize) -> Vec<Wrapped> {
     if width == 0 || line.width() <= width {
-        return vec![line];
+        return vec![(line, 0, 0)];
     }
     let cells: Vec<(char, Style)> = line
         .spans
@@ -110,8 +170,9 @@ pub fn wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         }
         end = end.max(start + 1);
         let mut spans = Vec::new();
-        if !out.is_empty() {
-            spans.push(Span::raw(" ".repeat(indent)));
+        let pre = if out.is_empty() { 0 } else { indent };
+        if pre > 0 {
+            spans.push(Span::raw(" ".repeat(pre)));
         }
         for (c, style) in &cells[start..end] {
             match spans.last_mut() {
@@ -119,7 +180,7 @@ pub fn wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
                 _ => spans.push(Span::styled(c.to_string(), *style)),
             }
         }
-        out.push(Line::from(spans).style(line.style));
+        out.push((Line::from(spans).style(line.style), start, pre));
         start = end;
     }
     out
@@ -173,7 +234,13 @@ mod tests {
             Span::styled("aaaa bbbb", red),
             Span::raw(" cccccccccccccc"),
         ]);
-        let lines = wrap(line, 12);
+        let wrapped = wrap(line.clone(), 12);
+        let starts: Vec<(usize, usize)> = wrapped.iter().map(|w| (w.1, w.2)).collect();
+        assert_eq!(starts, [(0, 0), (11, 6), (16, 6), (22, 6), (28, 6)]);
+        assert_eq!(char_at(&line, 11, 0), Some(11));
+        assert_eq!(char_at(&line, 0, 7), Some(7));
+        assert_eq!(char_at(&line, 28, 5), None);
+        let lines: Vec<Line> = wrapped.into_iter().map(|w| w.0).collect();
         let text: Vec<String> = lines.iter().map(plain).collect();
         assert_eq!(
             text,

@@ -9,7 +9,12 @@ use app::{App, Effect};
 use futures_util::{SinkExt, StreamExt};
 use ratatui::{
     DefaultTerminal,
-    crossterm::event::{self, Event, KeyEventKind},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind,
+        },
+        execute,
+    },
 };
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -59,12 +64,27 @@ pub fn open_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Turns on mouse reports, and makes sure a panic turns them off again before
+/// ratatui's own hook restores the terminal.
+fn capture_mouse() -> std::io::Result<()> {
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        restore(info);
+    }));
+    execute!(std::io::stdout(), EnableMouseCapture)
+}
+
 /// Runs the terminal infoview; returns the process exit code.
 pub async fn main() -> i32 {
     let result = match ratatui::try_init() {
-        Ok(mut terminal) => shell(&mut terminal).await,
+        Ok(mut terminal) => match capture_mouse() {
+            Ok(()) => shell(&mut terminal).await,
+            Err(e) => Err(e.into()),
+        },
         Err(e) => Err(e.into()),
     };
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     match result {
         Ok(()) => 0,
@@ -86,7 +106,15 @@ async fn shell(terminal: &mut DefaultTerminal) -> anyhow::Result<()> {
         loop {
             match event::read() {
                 Ok(Event::Key(key)) if key.kind != KeyEventKind::Press => {}
-                Ok(e @ (Event::Key(_) | Event::Resize(..))) => {
+                // Capture reports every motion; only clicks and the wheel matter.
+                Ok(Event::Mouse(m))
+                    if !matches!(
+                        m.kind,
+                        MouseEventKind::Down(_)
+                            | MouseEventKind::ScrollDown
+                            | MouseEventKind::ScrollUp
+                    ) => {}
+                Ok(e @ (Event::Key(_) | Event::Mouse(_) | Event::Resize(..))) => {
                     if tx.send(e).is_err() {
                         return;
                     }
@@ -172,10 +200,11 @@ async fn session(
     }
 }
 
-/// A key press goes to the app; a resize only redraws; lost input quits.
+/// Keys and the mouse go to the app; a resize only redraws; lost input quits.
 fn key(app: &mut App, input: Option<Event>) -> Vec<Effect> {
     match input {
         Some(Event::Key(key)) => app.on_key(key),
+        Some(Event::Mouse(mouse)) => app.on_mouse(mouse),
         Some(_) => vec![],
         None => vec![Effect::Quit],
     }

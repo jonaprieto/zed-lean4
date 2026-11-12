@@ -74,7 +74,12 @@ Keys: `q`, `Esc` or `Ctrl-C` quit, `p` pins the current goals, `a` shows all
 messages, `c` copies the goals into a comment in the buffer, `j`/`k` or the
 arrow keys move the selection, `g`/`G` jump to the top or bottom, and `Enter`,
 space or `Tab` fold the section, goal or message around the selection. Long
-lines wrap with a hanging indent. Lean widgets render
+lines wrap with a hanging indent.
+
+The mouse works too: the wheel scrolls, a click on a header folds it, and a
+click on a term in a goal shows its type and docstring below the goals. With a
+term picked, `d` and `t` jump Zed to its definition or its type, and `Esc`
+closes the panel. Hold Shift to select text with the mouse instead. Lean widgets render
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
 

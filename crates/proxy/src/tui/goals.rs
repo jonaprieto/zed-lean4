@@ -5,6 +5,8 @@ use ratatui::{
 };
 use serde_json::Value;
 
+use super::view::{Link, Text};
+
 const HYP: Style = Style::new().fg(Color::Cyan);
 const PREFIX: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
 const INACCESSIBLE: Style = Style::new().add_modifier(Modifier::DIM);
@@ -21,7 +23,7 @@ const KEYWORDS: &[&str] = &[
 /// The plain text of a `TaggedText`.
 pub fn text(t: &Value) -> String {
     let mut out = String::new();
-    runs(t, Style::new(), &mut |s, _| out.push_str(s));
+    runs(t, Style::new(), None, &mut |s, _, _| out.push_str(s));
     out
 }
 
@@ -29,6 +31,16 @@ pub fn text(t: &Value) -> String {
 pub fn ref_key(v: &Value) -> Option<&str> {
     let m = v.as_object().filter(|m| m.len() == 1)?;
     m.get("__rpcref").or_else(|| m.get("p"))?.as_str()
+}
+
+/// Whether `v` contains the reference `r`.
+pub fn holds(v: &Value, r: &Value) -> bool {
+    v == r
+        || match v {
+            Value::Object(m) => m.values().any(|v| holds(v, r)),
+            Value::Array(a) => a.iter().any(|v| holds(v, r)),
+            _ => false,
+        }
 }
 
 /// Every RPC reference inside `v`, so the session can release them.
@@ -59,7 +71,7 @@ pub fn goal_text(goal: &Value) -> String {
 }
 
 /// The goal's lines: case name, hypotheses and the target, colored like the infoview.
-pub fn goal_lines(goal: &Value) -> Vec<Line<'static>> {
+pub fn goal_lines(goal: &Value) -> Vec<Text> {
     let mut out = Vec::new();
     let locals: Vec<&str> = goal["hyps"]
         .as_array()
@@ -68,10 +80,10 @@ pub fn goal_lines(goal: &Value) -> Vec<Line<'static>> {
         .flat_map(names)
         .collect();
     if let Some(case) = goal["userName"].as_str() {
-        out.push(Line::from(vec![
+        out.push(Text::from(Line::from(vec![
             Span::styled("case ", INACCESSIBLE),
             Span::styled(case.to_owned(), Style::new().add_modifier(Modifier::BOLD)),
-        ]));
+        ])));
     }
     for hyp in goal["hyps"].as_array().into_iter().flatten() {
         let mark = marked(hyp);
@@ -88,17 +100,16 @@ pub fn goal_lines(goal: &Value) -> Vec<Line<'static>> {
             head.push(Span::styled(name.to_owned(), style.patch(mark)));
         }
         head.push(Span::raw(" : "));
-        let mut lines = typeset(head, &hyp["type"], &locals);
+        let mut lines = typeset(Line::from(head).into(), &hyp["type"], &locals);
         if !hyp["val"].is_null() {
-            let last = lines.pop().unwrap_or_default();
-            let mut spans = last.spans;
-            spans.push(Span::raw(" := "));
-            lines.extend(typeset(spans, &hyp["val"], &locals));
+            let mut last = lines.pop().unwrap_or_default();
+            last.line.spans.push(Span::raw(" := "));
+            lines.extend(typeset(last, &hyp["val"], &locals));
         }
         out.extend(lines);
     }
-    let target = vec![Span::styled(prefix(goal), PREFIX.patch(marked(goal)))];
-    out.extend(typeset(target, &goal["type"], &locals));
+    let target = Line::from(Span::styled(prefix(goal), PREFIX.patch(marked(goal))));
+    out.extend(typeset(target.into(), &goal["type"], &locals));
     out
 }
 
@@ -127,20 +138,37 @@ fn marked(v: &Value) -> Style {
     }
 }
 
-/// `head` followed by `t`, split into lines at the pretty printer's newlines.
+/// `head` followed by `t`, split into lines at the pretty printer's newlines,
+/// with a link for each run inside a tagged subterm.
 /// Text outside a diff is highlighted, with the goal's `locals` colored like hypotheses.
-fn typeset(head: Vec<Span<'static>>, t: &Value, locals: &[&str]) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(head)];
-    runs(t, Style::new(), &mut |s, style| {
+pub fn typeset(head: Text, t: &Value, locals: &[&str]) -> Vec<Text> {
+    let mut col: usize = head
+        .line
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    let mut lines = vec![head];
+    runs(t, Style::new(), None, &mut |s, style, info| {
         for (i, part) in s.split('\n').enumerate() {
             if i > 0 {
-                lines.push(Line::default());
+                lines.push(Text::default());
+                col = 0;
             }
-            let spans = &mut lines.last_mut().expect("starts with the head").spans;
+            let text = lines.last_mut().expect("starts with the head");
             if style == Style::new() {
-                highlight(part, locals, spans);
+                highlight(part, locals, &mut text.line.spans);
             } else if !part.is_empty() {
-                spans.push(Span::styled(part.to_owned(), style));
+                text.line.spans.push(Span::styled(part.to_owned(), style));
+            }
+            let start = col;
+            col += part.chars().count();
+            if let Some(info) = info.filter(|_| col > start) {
+                text.links.push(Link {
+                    start,
+                    end: col,
+                    info: info.clone(),
+                });
             }
         }
     });
@@ -214,19 +242,25 @@ fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {
     }
 }
 
-/// Calls `f` with each text run of `t` and the diff style of its innermost tag.
-fn runs(t: &Value, style: Style, f: &mut impl FnMut(&str, Style)) {
+/// Calls `f` with each text run of `t`, the diff style and the info of its innermost tag.
+fn runs<'v>(
+    t: &'v Value,
+    style: Style,
+    info: Option<&'v Value>,
+    f: &mut impl FnMut(&str, Style, Option<&'v Value>),
+) {
     if let Some(s) = t["text"].as_str() {
-        f(s, style);
+        f(s, style, info);
     } else if let Some(parts) = t["append"].as_array() {
-        parts.iter().for_each(|p| runs(p, style, f));
-    } else if let Some([info, inner]) = t["tag"].as_array().map(Vec::as_slice) {
-        let style = match info["diffStatus"].as_str() {
+        parts.iter().for_each(|p| runs(p, style, info, f));
+    } else if let Some([tag, inner]) = t["tag"].as_array().map(Vec::as_slice) {
+        let style = match tag["diffStatus"].as_str() {
             Some("wasChanged" | "wasInserted" | "willInsert") => INSERTED,
             Some("willChange" | "willDelete" | "wasDeleted") => REMOVED,
             _ => style,
         };
-        runs(inner, style, f);
+        let info = tag.get("info").or(info);
+        runs(inner, style, info, f);
     }
 }
 
@@ -260,8 +294,9 @@ mod tests {
 
     #[test]
     fn goal_lines_keep_layout_and_mark_names_and_diffs() {
-        let lines = goal_lines(&goal());
-        let text: Vec<String> = lines.iter().map(plain).collect();
+        let texts = goal_lines(&goal());
+        let lines: Vec<&Line> = texts.iter().map(|t| &t.line).collect();
+        let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
         assert_eq!(
             text,
             [
@@ -278,6 +313,23 @@ mod tests {
         assert_eq!(lines[3].spans[0].style, PREFIX);
         assert_eq!(lines[3].spans[1].style, INSERTED);
         assert_eq!(lines[3].spans[2].style, Style::new());
+        // `h : ` is 4 characters; `n = 0` is the tagged subterm after it.
+        assert_eq!(
+            texts[2].links,
+            [Link {
+                start: 4,
+                end: 9,
+                info: json!({"p":"1"})
+            }]
+        );
+        assert_eq!(
+            texts[3].links,
+            [Link {
+                start: 2,
+                end: 3,
+                info: json!({"p":"2"})
+            }]
+        );
     }
 
     #[test]

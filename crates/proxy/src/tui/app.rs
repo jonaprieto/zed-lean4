@@ -1,33 +1,61 @@
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
 };
 
 use ratatui::{
     Frame,
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-    layout::{Constraint, Layout},
+    crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+    layout::{Constraint, Layout, Position, Rect},
     style::Stylize,
-    text::Line,
-    widgets::Paragraph,
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use serde_json::{Value, json};
 
 use super::{
     goals,
-    view::{self, Rows},
+    view::{self, Rows, Text},
 };
 
 const DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
 /// Lean's `RpcNeedsReconnect`: the file's worker restarted and dropped the session.
 const NEEDS_RECONNECT: i64 = -32900;
 const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
+const PICKED_KEYS: &str = "d definition  t type  esc close";
+/// Lines the wheel scrolls per notch.
+const WHEEL: usize = 3;
 
 #[derive(Debug, PartialEq)]
 pub enum Effect {
     Send(Value),
     OpenBrowser,
     Quit,
+}
+
+/// A clicked subterm and what Lean says about it.
+struct Picked {
+    label: String,
+    info: Value,
+    uri: String,
+    session: Value,
+    popup: Option<Value>,
+}
+
+/// Where the last render put each visible screen line: the body area and, per
+/// line, its row, the row characters it shows, and its wrap indentation.
+#[derive(Default)]
+struct Screen {
+    area: Rect,
+    lines: Vec<Segment>,
+}
+
+#[derive(Clone, Copy)]
+struct Segment {
+    row: usize,
+    start: usize,
+    end: usize,
+    indent: usize,
 }
 
 /// An RPC result and the session that holds its references.
@@ -61,14 +89,20 @@ pub struct App {
     /// The selected row, which `enter` folds or unfolds.
     selected: usize,
     folded: HashSet<String>,
-    /// First visible screen line; render keeps the selection in view.
+    /// First visible screen line; render keeps the selection in view while `follow`.
     scroll: Cell<usize>,
+    follow: bool,
+    screen: RefCell<Screen>,
+    picked: Option<Picked>,
     status: Option<String>,
     hello: Option<String>,
     subscribe: Option<String>,
     goal: Option<String>,
     term: Option<String>,
     insert: Option<String>,
+    popup: Option<String>,
+    goto: Option<String>,
+    open: Option<String>,
 }
 
 /// Clears `slot` and returns true when it holds `id`.
@@ -109,12 +143,18 @@ impl App {
             selected: 0,
             folded: HashSet::new(),
             scroll: Cell::new(0),
+            follow: true,
+            screen: RefCell::default(),
+            picked: None,
             status: None,
             hello: None,
             subscribe: None,
             goal: None,
             term: None,
             insert: None,
+            popup: None,
+            goto: None,
+            open: None,
         }
     }
 
@@ -215,14 +255,28 @@ impl App {
             for params in result.as_array().into_iter().flatten() {
                 self.publish(params);
             }
+        } else if take(&mut self.popup, id) {
+            if let Some(picked) = &mut self.picked {
+                picked.popup = Some(result.clone());
+            }
+        } else if take(&mut self.goto, id) {
+            return self.open_location(result);
+        } else if take(&mut self.open, id) {
+            if result["success"] == false {
+                self.status = Some("Zed could not open the location".into());
+            }
         } else if take(&mut self.goal, id) {
             let held = self.held(result.get("goals").is_some().then(|| result.clone()));
             let old = std::mem::replace(&mut self.goals, held);
-            return self.release(old);
+            let mut effects = self.unpick_if_gone();
+            effects.extend(self.release(old));
+            return effects;
         } else if take(&mut self.term, id) {
             let held = self.held((!result.is_null()).then(|| result.clone()));
             let old = std::mem::replace(&mut self.term_goal, held);
-            return self.release(old);
+            let mut effects = self.unpick_if_gone();
+            effects.extend(self.release(old));
+            return effects;
         } else if take(&mut self.insert, id) && result["applied"] == false {
             let reason = result["failureReason"].as_str();
             self.status = Some(reason.unwrap_or("The edit was not applied").into());
@@ -238,6 +292,14 @@ impl App {
                 _ => vec![],
             };
         }
+        if self.picked.is_some() {
+            match key.code {
+                KeyCode::Esc => return self.unpick(),
+                KeyCode::Char('d') => return self.go_to("definition"),
+                KeyCode::Char('t') => return self.go_to("type"),
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return vec![Effect::Quit],
             KeyCode::Char('p') if self.location.is_some() => {
@@ -250,7 +312,7 @@ impl App {
             KeyCode::Char('c') => return self.copy(),
             KeyCode::Char('o') if self.page_url.is_some() => return vec![Effect::OpenBrowser],
             KeyCode::Char('o') => self.status = Some("Not connected".into()),
-            KeyCode::Char('j') | KeyCode::Down => self.select(self.selected + 1),
+            KeyCode::Char('j') | KeyCode::Down => self.select(self.selected.saturating_add(1)),
             KeyCode::Char('k') | KeyCode::Up => {
                 let last = self.rows().len().saturating_sub(1);
                 self.select(self.selected.min(last).saturating_sub(1))
@@ -258,6 +320,26 @@ impl App {
             KeyCode::Char('g') => self.select(0),
             KeyCode::Char('G') => self.select(usize::MAX),
             KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Tab => self.toggle_fold(),
+            _ => {}
+        }
+        vec![]
+    }
+
+    /// The wheel scrolls; a left click selects a row, folds a header, or picks a subterm.
+    pub fn on_mouse(&mut self, mouse: MouseEvent) -> Vec<Effect> {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.follow = false;
+                self.scroll.set(self.scroll.get() + WHEEL);
+            }
+            MouseEventKind::ScrollUp => {
+                self.follow = false;
+                self.scroll.set(self.scroll.get().saturating_sub(WHEEL));
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.status = None;
+                return self.click(mouse.column, mouse.row);
+            }
             _ => {}
         }
         vec![]
@@ -272,35 +354,255 @@ impl App {
     }
 
     pub fn render(&self, frame: &mut Frame) {
-        let [body, footer] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+        let detail = self.detail();
+        let panel = if detail.is_empty() {
+            0
+        } else {
+            u16::try_from(detail.len() + 1).unwrap_or(u16::MAX).min(8)
+        };
+        let [body, panel, footer] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(panel),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
         let rows = self.rows();
         let selected = self.selected.min(rows.len().saturating_sub(1));
+        let mut screen = Screen {
+            area: body,
+            lines: Vec::new(),
+        };
         let (mut lines, mut top, mut bottom) = (Vec::new(), 0, 0);
         for (i, row) in rows.into_iter().enumerate() {
-            let mut wrapped = view::wrap(row.line, body.width.into());
             if i == selected {
                 top = lines.len();
-                bottom = top + wrapped.len();
-                for line in &mut wrapped {
+            }
+            let chars = row
+                .line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            let wrapped = view::wrap(row.line, body.width.into());
+            let ends: Vec<usize> = wrapped.iter().skip(1).map(|w| w.1).chain([chars]).collect();
+            for ((mut line, start, indent), end) in wrapped.into_iter().zip(ends) {
+                if i == selected {
                     line.style = line.style.patch(view::SELECTED);
                 }
+                screen.lines.push(Segment {
+                    row: i,
+                    start,
+                    end,
+                    indent,
+                });
+                lines.push(line);
             }
-            lines.extend(wrapped);
+            if i == selected {
+                bottom = lines.len();
+            }
         }
         let height = usize::from(body.height);
         let mut scroll = self.scroll.get().min(lines.len().saturating_sub(height));
-        scroll = scroll.max(bottom.saturating_sub(height)).min(top);
+        if self.follow {
+            scroll = scroll.max(bottom.saturating_sub(height)).min(top);
+        }
         self.scroll.set(scroll);
+        screen.lines.drain(..scroll.min(screen.lines.len()));
+        *self.screen.borrow_mut() = screen;
         let paragraph =
             Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, body);
-        frame.render_widget(Line::raw(self.status.as_deref().unwrap_or(KEYS)), footer);
+        if !detail.is_empty() {
+            let detail = Paragraph::new(detail)
+                .block(Block::new().borders(Borders::TOP))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(detail, panel);
+        }
+        let keys = if self.picked.is_some() {
+            PICKED_KEYS
+        } else {
+            KEYS
+        };
+        frame.render_widget(Line::raw(self.status.as_deref().unwrap_or(keys)), footer);
+    }
+
+    /// The picked subterm, its type and its docstring.
+    fn detail(&self) -> Vec<Line<'static>> {
+        let Some(picked) = &self.picked else {
+            return vec![];
+        };
+        let popup = picked.popup.as_ref();
+        let expr = popup.map(|p| &p["exprExplicit"]).filter(|e| !e.is_null());
+        let mut head = match expr {
+            Some(expr) => {
+                goals::typeset(Text::default(), expr, &[])
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default()
+                    .line
+            }
+            None => Line::raw(picked.label.clone()),
+        };
+        let mut lines: Vec<Line> = match popup.map(|p| &p["type"]).filter(|t| !t.is_null()) {
+            Some(ty) => {
+                head.spans.push(Span::raw(" : "));
+                goals::typeset(head.into(), ty, &[])
+                    .into_iter()
+                    .map(|t| t.line)
+                    .collect()
+            }
+            None => vec![head],
+        };
+        if let Some(doc) = popup.and_then(|p| p["doc"].as_str()) {
+            lines.extend(doc.lines().map(|l| Line::raw(l.to_owned()).dim()));
+        }
+        lines
+    }
+
+    fn click(&mut self, x: u16, y: u16) -> Vec<Effect> {
+        let hit = {
+            let screen = self.screen.borrow();
+            if !screen.area.contains(Position { x, y }) {
+                return vec![];
+            }
+            let line = usize::from(y - screen.area.y);
+            let col = usize::from(x - screen.area.x);
+            screen.lines.get(line).map(|&segment| (segment, col))
+        };
+        let Some((segment, col)) = hit else {
+            return vec![];
+        };
+        self.selected = segment.row;
+        self.follow = true;
+        let rows = self.rows();
+        let Some(row) = rows.get(segment.row) else {
+            return vec![];
+        };
+        let char = col
+            .checked_sub(segment.indent)
+            .and_then(|col| view::char_at(&row.line, segment.start, col))
+            .filter(|&c| c < segment.end);
+        let link = char.and_then(|c| row.links.iter().find(|l| l.start <= c && c < l.end));
+        // A header folds unless the click lands on a term in it.
+        let on_marker = char.is_some_and(|c| c < view::MARKER_WIDTH);
+        if row.header && (link.is_none() || on_marker) {
+            self.toggle_fold();
+            return vec![];
+        }
+        let Some(link) = link.cloned() else {
+            return self.unpick();
+        };
+        let label: String = row
+            .line
+            .spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .skip(link.start)
+            .take(link.end - link.start)
+            .collect();
+        self.pick(label, link.info)
+    }
+
+    /// Asks Lean for the type and docstring of the subterm `info`, in the
+    /// session that issued the reference.
+    fn pick(&mut self, label: String, info: Value) -> Vec<Effect> {
+        let mut effects = self.unpick();
+        let Some((uri, session)) = self.owner(&info) else {
+            return effects;
+        };
+        let (id, call) = self.rpc(
+            &uri,
+            &session,
+            "Lean.Widget.InteractiveDiagnostics.infoToInteractive",
+            info.clone(),
+        );
+        self.popup = Some(id);
+        self.picked = Some(Picked {
+            label,
+            info,
+            uri,
+            session,
+            popup: None,
+        });
+        effects.push(call);
+        effects
+    }
+
+    /// Closes the detail panel and releases the references its popup held.
+    fn unpick(&mut self) -> Vec<Effect> {
+        self.popup = None;
+        self.goto = None;
+        let Some(picked) = self.picked.take() else {
+            return vec![];
+        };
+        let popup = picked.popup.map(|value| Held {
+            uri: picked.uri,
+            session: picked.session,
+            value,
+        });
+        self.release(popup)
+    }
+
+    /// The file and session of the shown result that holds `info`.
+    fn owner(&self, info: &Value) -> Option<(String, Value)> {
+        [&self.goals, &self.term_goal]
+            .into_iter()
+            .flatten()
+            .find(|h| goals::holds(&h.value, info))
+            .map(|h| (h.uri.clone(), h.session.clone()))
+    }
+
+    /// Drops the picked subterm once no shown result holds its reference.
+    fn unpick_if_gone(&mut self) -> Vec<Effect> {
+        match &self.picked {
+            Some(picked) if self.owner(&picked.info).is_none() => self.unpick(),
+            _ => vec![],
+        }
+    }
+
+    fn go_to(&mut self, kind: &str) -> Vec<Effect> {
+        let Some(picked) = &self.picked else {
+            return vec![];
+        };
+        let (uri, session) = (picked.uri.clone(), picked.session.clone());
+        let params = json!({"kind":kind,"info":picked.info});
+        let (id, call) = self.rpc(&uri, &session, "Lean.Widget.getGoToLocation", params);
+        self.goto = Some(id);
+        vec![call]
+    }
+
+    /// Opens the first location Lean found in Zed.
+    fn open_location(&mut self, result: &Value) -> Vec<Effect> {
+        let Some(target) = result.as_array().and_then(|l| l.first()) else {
+            self.status = Some("No location found".into());
+            return vec![];
+        };
+        let show = json!({"uri":target["targetUri"],"selection":target["targetSelectionRange"],"takeFocus":true});
+        let (id, call) = self.call("showDocument", json!([show]));
+        self.open = Some(id);
+        vec![call]
+    }
+
+    /// A widget RPC call into `session` for the file `uri`.
+    fn rpc(&mut self, uri: &str, session: &Value, method: &str, params: Value) -> (String, Effect) {
+        let shown = self.location.as_ref().filter(|l| l["uri"] == uri);
+        let position = shown.map_or(json!({"line":0,"character":0}), |l| {
+            l["range"]["start"].clone()
+        });
+        let call = json!({"textDocument":{"uri":uri},"position":position,
+            "sessionId":session,"method":method,"params":params});
+        let (id, call) = self.call("sendClientRequest", json!([uri, "$/lean/rpc/call", call]));
+        self.inflight
+            .insert(id.clone(), (uri.to_owned(), session.clone()));
+        (id, call)
     }
 
     /// The ids of requests still waiting for a reply.
-    fn pending(&mut self) -> [&mut Option<String>; 5] {
+    fn pending(&mut self) -> [&mut Option<String>; 8] {
         [
+            &mut self.popup,
+            &mut self.goto,
+            &mut self.open,
             &mut self.hello,
             &mut self.subscribe,
             &mut self.goal,
@@ -345,16 +647,14 @@ impl App {
             return vec![connect];
         };
         let params = json!({"textDocument":{"uri":uri},"position":location["range"]["start"]});
-        let mut rpc = |method: &str| {
-            let call = json!({"textDocument":params["textDocument"],"position":params["position"],
-                "sessionId":session,"method":method,"params":params});
-            let (id, call) = self.call("sendClientRequest", json!([uri, "$/lean/rpc/call", call]));
-            self.inflight
-                .insert(id.clone(), (uri.clone(), session.clone()));
-            (id, call)
-        };
-        let (goal_id, goal) = rpc("Lean.Widget.getInteractiveGoals");
-        let (term_id, term) = rpc("Lean.Widget.getInteractiveTermGoal");
+        let (goal_id, goal) = self.rpc(
+            &uri,
+            &session,
+            "Lean.Widget.getInteractiveGoals",
+            params.clone(),
+        );
+        let (term_id, term) =
+            self.rpc(&uri, &session, "Lean.Widget.getInteractiveTermGoal", params);
         self.goal = Some(goal_id);
         self.term = Some(term_id);
         vec![goal, term]
@@ -416,6 +716,7 @@ impl App {
 
     fn select(&mut self, row: usize) {
         self.selected = row.min(self.rows().len().saturating_sub(1));
+        self.follow = true;
     }
 
     /// Folds or unfolds the innermost block around the selected row.
@@ -473,7 +774,7 @@ impl App {
                 let case = goal["userName"].as_str();
                 let header = match case {
                     Some(_) => lines.next(),
-                    None if goals.len() > 1 => Some(Line::raw(format!("goal {}", i + 1))),
+                    None if goals.len() > 1 => Some(Line::raw(format!("goal {}", i + 1)).into()),
                     None => None,
                 };
                 if let Some(header) = header {
@@ -1053,6 +1354,133 @@ mod tests {
             ]
         );
         shows(&app, &["⊢ B"]);
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn click(column: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+
+    #[test]
+    fn clicking_a_subterm_shows_its_type_and_goes_to_its_definition() {
+        let mut app = app();
+        let target =
+            json!({"append":[{"tag":[{"info":{"p":"9"}},{"text":"Nat.succ"}]},{"text":" n"}]});
+        app.on_message(&json!({"id":"tui-1:4","result":{"goals":[{"hyps":[],"type":target}]}}));
+        // Rows: F.lean:2:2, blank, ▾ Tactic state, 1 goal, ⊢ Nat.succ n.
+        assert_eq!(screen(&app)[4], "⊢ Nat.succ n");
+        assert!(app.on_mouse(click(11, 4)).is_empty(), "` n` is not tagged");
+        let rpc = |id: &str, method: &str, params: Value| {
+            json!({"id":id,"call":"sendClientRequest","args":[U,"$/lean/rpc/call",
+                {"textDocument":{"uri":U},"position":{"line":1,"character":2},"sessionId":"s1","method":method,"params":params}]})
+        };
+        assert_eq!(
+            sent(app.on_mouse(click(3, 4))),
+            [rpc(
+                "tui-1:6",
+                "Lean.Widget.InteractiveDiagnostics.infoToInteractive",
+                json!({"p":"9"})
+            )]
+        );
+        shows(&app, &["Nat.succ"]);
+        assert_eq!(screen(&app)[19], PICKED_KEYS);
+        app.on_message(
+            &json!({"id":"tui-1:6","result":{"type":{"text":"Nat → Nat"},"doc":"The successor."}}),
+        );
+        shows(&app, &["Nat.succ : Nat → Nat", "The successor."]);
+        assert_eq!(
+            sent(app.on_key(key('d'))),
+            [rpc(
+                "tui-1:7",
+                "Lean.Widget.getGoToLocation",
+                json!({"kind":"definition","info":{"p":"9"}})
+            )]
+        );
+        let range = json!({"start":{"line":3,"character":0},"end":{"line":3,"character":4}});
+        let found = json!({"id":"tui-1:7","result":[{"targetUri":"file:///lib/Nat.lean","targetRange":range,"targetSelectionRange":range}]});
+        assert_eq!(
+            sent(app.on_message(&found)),
+            [
+                json!({"id":"tui-1:8","call":"showDocument","args":[{"uri":"file:///lib/Nat.lean","selection":range,"takeFocus":true}]})
+            ]
+        );
+        app.on_message(&json!({"id":"tui-1:8","result":{"success":false}}));
+        assert_eq!(screen(&app)[19], "Zed could not open the location");
+        app.on_key(key('t'));
+        app.on_message(&json!({"id":"tui-1:9","result":[]}));
+        assert_eq!(screen(&app)[19], "No location found");
+        // Esc closes the detail first, then quits.
+        assert!(
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .is_empty()
+        );
+        hides(&app, "Nat.succ : Nat → Nat");
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            [Effect::Quit]
+        );
+    }
+
+    #[test]
+    fn new_goals_drop_the_picked_subterm() {
+        let mut app = app();
+        let target = json!({"tag":[{"info":{"p":"9"}},{"text":"A"}]});
+        app.on_message(&json!({"id":"tui-1:4","result":{"goals":[{"hyps":[],"type":target}]}}));
+        screen(&app);
+        app.on_mouse(click(2, 4));
+        app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
+        app.on_message(&json!({"id":"tui-1:7","result":goals(&["⊢ B"])}));
+        assert_eq!(screen(&app)[19], KEYS);
+        app.on_message(&json!({"id":"tui-1:6","result":{"type":{"text":"late"}}}));
+        hides(&app, "A : late");
+    }
+
+    #[test]
+    fn closing_the_detail_releases_its_popup_and_wrapped_ends_are_not_terms() {
+        let mut app = app();
+        // 55 untagged characters, then a tagged term that wraps onto the next screen line.
+        let target = json!({"append":[{"text":"x".repeat(55)},{"text":" "},{"tag":[{"info":{"__rpcref":"9"}},{"text":"Tagged"}]}]});
+        app.on_message(&json!({"id":"tui-1:4","result":{"goals":[{"hyps":[],"type":target}]}}));
+        assert_eq!(screen(&app)[5], "    Tagged");
+        // Column 59 of the first segment is blank space after the break, not `Tagged`.
+        assert!(app.on_mouse(click(59, 4)).is_empty());
+        let picked = sent(app.on_mouse(click(7, 5)));
+        assert_eq!(picked[0]["args"][2]["params"], json!({"__rpcref":"9"}));
+        app.on_message(&json!({"id":"tui-1:6","result":{"type":{"tag":[{"info":{"__rpcref":"10"}},{"text":"T"}]}}}));
+        assert_eq!(
+            sent(app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+            [
+                json!({"id":"tui-1:7","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                {"uri":U,"sessionId":"s1","refs":[{"__rpcref":"10"}]}]})
+            ]
+        );
+    }
+
+    #[test]
+    fn clicking_a_header_folds_it_and_the_wheel_scrolls() {
+        let mut app = app();
+        let diagnostics: Vec<Value> = (0..30)
+            .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
+            .collect();
+        app.on_message(&json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":diagnostics}]}));
+        assert_eq!(screen(&app)[2], "▾ Messages (30)");
+        app.on_mouse(mouse(MouseEventKind::ScrollDown, 0, 0));
+        assert_eq!(screen(&app)[0], "2:0 error: m0");
+        app.on_mouse(mouse(MouseEventKind::ScrollUp, 0, 0));
+        assert_eq!(screen(&app)[0], "F.lean:2:2");
+        app.on_mouse(click(5, 2));
+        assert_eq!(screen(&app)[2], "▸ Messages (30)");
+        hides(&app, "2:0 error: m0");
+        // Clicks outside the body do nothing.
+        assert!(app.on_mouse(click(5, 19)).is_empty());
     }
 
     #[test]
