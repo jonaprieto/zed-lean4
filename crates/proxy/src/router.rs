@@ -45,9 +45,14 @@ impl Router {
 
     fn on_client(&mut self, m: Value) -> Vec<Action> {
         if msg::is_request(&m) && msg::method(&m) == Some("textDocument/hover") {
+            let (Some(doc), Some(pos)) =
+                (m["params"].get("textDocument"), m["params"].get("position"))
+            else {
+                return vec![Action::ToServer(m)];
+            };
+            let params = json!({"textDocument": doc, "position": pos});
             let key = msg::id_key(&m["id"]);
             let id = self.proxy_id();
-            let params = json!({"textDocument": m["params"]["textDocument"], "position": m["params"]["position"]});
             let goal_req = msg::request(&id, "$/lean/plainGoal", params);
             self.goal_for.insert(id, key.clone());
             self.hovers.insert(key, HoverJoin::default());
@@ -188,6 +193,75 @@ mod tests {
         assert_eq!(
             r.handle(Event::FromServer(goal_resp("lean4-ide:99"))),
             vec![]
+        );
+    }
+
+    #[test]
+    fn hover_error_passes_through_unchanged() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        r.handle(Event::FromServer(goal_resp("lean4-ide:1")));
+        let err =
+            json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32800, "message": "cancelled"}});
+        assert_eq!(
+            r.handle(Event::FromServer(err.clone())),
+            vec![Action::ToClient(err)]
+        );
+    }
+
+    #[test]
+    fn null_hover_result_shows_goal_alone() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        r.handle(Event::FromServer(goal_resp("lean4-ide:1")));
+        let out = r.handle(Event::FromServer(
+            json!({"jsonrpc": "2.0", "id": 7, "result": null}),
+        ));
+        assert_eq!(
+            out,
+            vec![Action::ToClient(
+                json!({"jsonrpc": "2.0", "id": 7, "result": {"contents": {"kind": "markdown", "value": "G"}}})
+            )]
+        );
+    }
+
+    #[test]
+    fn plain_goal_error_keeps_hover() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        r.handle(Event::FromServer(json!({"jsonrpc": "2.0", "id": "lean4-ide:1", "error": {"code": -32801, "message": "modified"}})));
+        assert_eq!(
+            r.handle(Event::FromServer(hover_resp(json!(7)))),
+            vec![Action::ToClient(hover_resp(json!(7)))]
+        );
+    }
+
+    #[test]
+    fn hover_without_position_skips_plain_goal() {
+        let mut r = Router::default();
+        let bare = json!({"jsonrpc": "2.0", "id": 8, "method": "textDocument/hover", "params": {}});
+        assert_eq!(
+            r.handle(Event::FromClient(bare.clone())),
+            vec![Action::ToServer(bare)]
+        );
+        let resp = json!({"jsonrpc": "2.0", "id": 8, "result": null});
+        assert_eq!(
+            r.handle(Event::FromServer(resp.clone())),
+            vec![Action::ToClient(resp)]
+        );
+    }
+
+    #[test]
+    fn string_client_id_completes_its_own_join() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!("7"))));
+        r.handle(Event::FromServer(goal_resp("lean4-ide:1")));
+        let out = r.handle(Event::FromServer(hover_resp(json!("7"))));
+        assert_eq!(
+            out,
+            vec![Action::ToClient(
+                json!({"jsonrpc": "2.0", "id": "7", "result": {"contents": {"kind": "markdown", "value": "doc\n\n---\n\nG"}}})
+            )]
         );
     }
 }
