@@ -25,3 +25,12 @@ pub fn request(id: &str, method: &str, params: Value) -> Value {
 pub fn notification(method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "method": method, "params": params})
 }
+
+pub fn proxy_response_id(m: &Value) -> Option<&str> {
+    if !is_response(m) {
+        return None;
+    }
+    m["id"]
+        .as_str()
+        .filter(|id| id.starts_with(PROXY_ID_PREFIX))
+}

@@ -48,6 +48,9 @@ impl Router {
     }
 
     fn on_client(&mut self, m: Value) -> Vec<Action> {
+        if msg::proxy_response_id(&m).is_some() {
+            return vec![];
+        }
         if msg::is_request(&m) && msg::method(&m) == Some("textDocument/hover") {
             let (Some(doc), Some(pos)) =
                 (m["params"].get("textDocument"), m["params"].get("position"))
@@ -80,10 +83,7 @@ impl Router {
         if !msg::is_response(&m) {
             return vec![Action::ToClient(m)];
         }
-        if let Some(own) = m["id"]
-            .as_str()
-            .filter(|id| id.starts_with(msg::PROXY_ID_PREFIX))
-        {
+        if let Some(own) = msg::proxy_response_id(&m) {
             let Some(Pending::Goal(key)) = self.pending.remove(own) else {
                 return vec![];
             };
@@ -356,5 +356,30 @@ mod pending_tests {
             ))
             .is_empty()
         );
+    }
+}
+
+#[cfg(test)]
+mod reverse_tests {
+    use super::*;
+
+    #[test]
+    fn consumes_only_proxy_responses_from_zed() {
+        let mut r = Router::default();
+        for m in [
+            json!({"id": "lean4-ide:9", "result": {"applied": true}}),
+            json!({"id": "lean4-ide:9", "error": {"code": -1}}),
+        ] {
+            assert!(r.handle(Event::FromClient(m)).is_empty());
+        }
+        for m in [
+            json!({"id": 9, "result": null}),
+            json!({"id": "lean4-ide:9", "method": "unknown"}),
+        ] {
+            assert_eq!(
+                r.handle(Event::FromClient(m.clone())),
+                vec![Action::ToServer(m)]
+            );
+        }
     }
 }
