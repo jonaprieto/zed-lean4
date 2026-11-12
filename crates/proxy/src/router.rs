@@ -24,8 +24,8 @@ pub struct Router {
     hovers: HashMap<String, HoverJoin>,
 }
 
-#[derive(Default)]
 struct HoverJoin {
+    goal_id: String,
     response: Option<Value>,
     goal: Option<Option<String>>,
 }
@@ -54,9 +54,20 @@ impl Router {
             let key = msg::id_key(&m["id"]);
             let id = self.proxy_id();
             let goal_req = msg::request(&id, "$/lean/plainGoal", params);
+            let join = HoverJoin {
+                goal_id: id.clone(),
+                response: None,
+                goal: None,
+            };
             self.goal_for.insert(id, key.clone());
-            self.hovers.insert(key, HoverJoin::default());
+            self.hovers.insert(key, join);
             return vec![Action::ToServer(m), Action::ToServer(goal_req)];
+        }
+        if msg::method(&m) == Some("$/cancelRequest")
+            && let Some(join) = self.hovers.get(&msg::id_key(&m["params"]["id"]))
+        {
+            let goal_cancel = msg::notification("$/cancelRequest", json!({"id": join.goal_id}));
+            return vec![Action::ToServer(m), Action::ToServer(goal_cancel)];
         }
         vec![Action::ToServer(m)]
     }
@@ -79,6 +90,10 @@ impl Router {
         }
         let key = msg::id_key(&m["id"]);
         match self.hovers.get_mut(&key) {
+            Some(_) if m.get("error").is_some() => {
+                self.hovers.remove(&key);
+                vec![Action::ToClient(m)]
+            }
             Some(join) => {
                 join.response = Some(m);
                 self.finish_hover(&key)
@@ -262,6 +277,49 @@ mod tests {
             vec![Action::ToClient(
                 json!({"jsonrpc": "2.0", "id": "7", "result": {"contents": {"kind": "markdown", "value": "doc\n\n---\n\nG"}}})
             )]
+        );
+    }
+
+    fn cancel(id: Value) -> Value {
+        json!({"jsonrpc": "2.0", "method": "$/cancelRequest", "params": {"id": id}})
+    }
+
+    #[test]
+    fn cancelling_a_hover_also_cancels_its_plain_goal() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        assert_eq!(
+            r.handle(Event::FromClient(cancel(json!(7)))),
+            vec![
+                Action::ToServer(cancel(json!(7))),
+                Action::ToServer(cancel(json!("lean4-ide:1"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn other_cancels_pass_through_alone() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        assert_eq!(
+            r.handle(Event::FromClient(cancel(json!(9)))),
+            vec![Action::ToServer(cancel(json!(9)))]
+        );
+    }
+
+    #[test]
+    fn hover_error_is_sent_without_waiting_for_the_goal() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        let err =
+            json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32800, "message": "cancelled"}});
+        assert_eq!(
+            r.handle(Event::FromServer(err.clone())),
+            vec![Action::ToClient(err)]
+        );
+        assert_eq!(
+            r.handle(Event::FromServer(goal_resp("lean4-ide:1"))),
+            vec![]
         );
     }
 }

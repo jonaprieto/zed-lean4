@@ -22,3 +22,6 @@ pub fn id_key(id: &Value) -> String {
 pub fn request(id: &str, method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
+pub fn notification(method: &str, params: Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": method, "params": params})
+}
