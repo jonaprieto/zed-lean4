@@ -4,6 +4,10 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    // No tracing for the TUI: log lines would corrupt the drawn screen.
+    if std::env::args().nth(1).as_deref() == Some("tui") {
+        std::process::exit(lean4_ide_proxy::tui::main().await)
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)

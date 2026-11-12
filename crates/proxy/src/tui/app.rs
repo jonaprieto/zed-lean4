@@ -198,6 +198,10 @@ impl App {
         vec![]
     }
 
+    pub fn set_status(&mut self, status: String) {
+        self.status = Some(status);
+    }
+
     pub fn page_url(&self) -> Option<&str> {
         self.page_url.as_deref()
     }
