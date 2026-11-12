@@ -2,6 +2,9 @@
 use crate::{bridge, cursor, hover, init, msg};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::time::Duration;
+
+pub const KEEPALIVE: Duration = Duration::from_secs(10);
 
 /// The file a notification is about: `uri` in diagnostics, `textDocument.uri`
 /// in Lean's file progress.
@@ -12,8 +15,9 @@ fn notification_uri(params: &Value) -> Option<&str> {
 }
 
 #[derive(Debug)]
-#[allow(clippy::enum_variant_names)]
 pub enum Event {
+    Tick,
+    PageClosed(u64),
     FromBrowser(u64, Value),
     FromClient(Value),
     FromServer(Value),
@@ -30,6 +34,7 @@ pub enum Action {
 #[derive(Default)]
 pub struct Router {
     next_id: u64,
+    sessions: HashMap<String, Session>,
     location: Option<Value>,
     initialize_id: Option<String>,
     initialize_result: Option<Value>,
@@ -41,8 +46,21 @@ pub struct Router {
 }
 
 enum Pending {
-    Page { id: String },
+    Page {
+        id: String,
+    },
+    Connect {
+        id: String,
+        uri: String,
+        connection: u64,
+    },
     Goal(String),
+}
+
+struct Session {
+    uri: String,
+    id: Value,
+    connection: u64,
 }
 
 struct HoverJoin {
@@ -54,6 +72,15 @@ struct HoverJoin {
 impl Router {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
+            Event::Tick => self.tick(),
+            Event::PageClosed(connection) => {
+                self.sessions
+                    .retain(|_, session| session.connection != connection);
+                self.pending.retain(|_, pending| {
+                    !matches!(pending, Pending::Connect { connection: owner, .. } if *owner == connection)
+                });
+                vec![]
+            }
             Event::FromBrowser(connection, m) => self.on_browser(connection, m),
             Event::FromClient(m) => self.on_client(init::rewrite_request(m)),
             Event::FromServer(m) => self.on_server(m),
@@ -86,6 +113,7 @@ impl Router {
             if method == "textDocument/didClose"
                 && let Some(uri) = m["params"]["textDocument"]["uri"].as_str()
             {
+                self.sessions.retain(|_, session| session.uri != uri);
                 for values in self.latest.values_mut() {
                     values.remove(uri);
                 }
@@ -175,6 +203,32 @@ impl Router {
                     self.finish_hover(&key)
                 }
                 Some(Pending::Page { id }) => vec![Action::ToBrowser(bridge::relay(&id, &m))],
+                Some(Pending::Connect {
+                    id,
+                    uri,
+                    connection,
+                }) => {
+                    if m.get("error").is_some() {
+                        return vec![Action::ToBrowser(bridge::relay(&id, &m))];
+                    }
+                    let sid = &m["result"]["sessionId"];
+                    if !sid.is_string() && !sid.is_number() {
+                        return vec![Action::ToBrowser(bridge::reply_error(
+                            &id,
+                            -32603,
+                            "missing RPC session id",
+                        ))];
+                    }
+                    self.sessions.insert(
+                        msg::id_key(sid),
+                        Session {
+                            uri,
+                            id: sid.clone(),
+                            connection,
+                        },
+                    );
+                    vec![Action::ToBrowser(bridge::reply(&id, sid.clone()))]
+                }
                 None => vec![],
             };
         }
@@ -194,7 +248,7 @@ impl Router {
         }
     }
 
-    fn on_browser(&mut self, _connection: u64, m: Value) -> Vec<Action> {
+    fn on_browser(&mut self, connection: u64, m: Value) -> Vec<Action> {
         let Some(call) = bridge::Call::parse(&m) else {
             return m["id"]
                 .as_str()
@@ -208,6 +262,26 @@ impl Router {
                 .unwrap_or_default();
         };
         match (call.name.as_str(), call.args.as_slice()) {
+            ("createRpcSession", [uri]) if uri.is_string() => {
+                let id = self.proxy_id();
+                self.pending.insert(
+                    id.clone(),
+                    Pending::Connect {
+                        id: call.id,
+                        uri: uri.as_str().unwrap().into(),
+                        connection,
+                    },
+                );
+                vec![Action::ToServer(msg::request(
+                    &id,
+                    "$/lean/rpc/connect",
+                    json!({"uri":uri}),
+                ))]
+            }
+            ("closeRpcSession", [sid]) => {
+                self.sessions.remove(&msg::id_key(sid));
+                vec![Action::ToBrowser(bridge::reply(&call.id, Value::Null))]
+            }
             ("hello", []) => vec![Action::ToBrowser(bridge::reply(
                 &call.id,
                 json!({"location":self.location,"initializeResult":self.initialize_result}),
@@ -251,6 +325,18 @@ impl Router {
                 "unsupported or malformed page call",
             ))],
         }
+    }
+
+    fn tick(&self) -> Vec<Action> {
+        self.sessions
+            .values()
+            .map(|session| {
+                Action::ToServer(msg::notification(
+                    "$/lean/rpc/keepAlive",
+                    json!({"uri":session.uri,"sessionId":session.id}),
+                ))
+            })
+            .collect()
     }
 
     fn finish_hover(&mut self, key: &str) -> Vec<Action> {
@@ -697,5 +783,91 @@ mod cursor_tests {
             json!({"textDocument":{"uri":"file:///F.lean"}}),
         )));
         assert!(r.location.is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_sessions_keep_alive_close_and_reconnect() {
+        let mut r = Router::default();
+        let create = json!({"id":"a:1","call":"createRpcSession","args":["file:///F.lean"]});
+        assert_eq!(
+            r.handle(Event::FromBrowser(1, create.clone())),
+            vec![Action::ToServer(msg::request(
+                "lean4-ide:1",
+                "$/lean/rpc/connect",
+                json!({"uri":"file:///F.lean"})
+            ))]
+        );
+        let sid = json!("18446744073709551615");
+        assert_eq!(
+            r.handle(Event::FromServer(
+                json!({"id":"lean4-ide:1","result":{"sessionId":sid}})
+            )),
+            vec![Action::ToBrowser(bridge::reply("a:1", sid.clone()))]
+        );
+        let keep = vec![Action::ToServer(msg::notification(
+            "$/lean/rpc/keepAlive",
+            json!({"uri":"file:///F.lean","sessionId":sid}),
+        ))];
+        assert_eq!(r.handle(Event::Tick), keep);
+        assert_eq!(r.handle(Event::Tick), keep);
+        r.handle(Event::FromBrowser(
+            1,
+            json!({"id":"a:2","call":"closeRpcSession","args":[sid]}),
+        ));
+        assert!(r.handle(Event::Tick).is_empty());
+        r.handle(Event::FromBrowser(1, create));
+        r.handle(Event::FromServer(
+            json!({"id":"lean4-ide:2","result":{"sessionId":"new"}}),
+        ));
+        assert_eq!(r.sessions.len(), 1);
+        r.handle(Event::FromBrowser(
+            1,
+            json!({"id":"a:3","call":"closeRpcSession","args":["new"]}),
+        ));
+        assert!(r.handle(Event::Tick).is_empty());
+    }
+
+    #[test]
+    fn page_close_removes_only_owned_sessions_and_pending_connects() {
+        let mut r = Router::default();
+        for (connection, page, proxy, session) in [
+            (1, "a:1", "lean4-ide:1", "first"),
+            (2, "b:1", "lean4-ide:2", "second"),
+        ] {
+            r.handle(Event::FromBrowser(
+                connection,
+                json!({"id":page,"call":"createRpcSession","args":["file:///F.lean"]}),
+            ));
+            r.handle(Event::FromServer(
+                json!({"id":proxy,"result":{"sessionId":session}}),
+            ));
+        }
+        r.handle(Event::FromBrowser(
+            1,
+            json!({"id":"a:2","call":"createRpcSession","args":["file:///F.lean"]}),
+        ));
+        assert_eq!(r.handle(Event::Tick).len(), 2);
+        assert!(r.handle(Event::PageClosed(1)).is_empty());
+        assert!(r.pending.is_empty());
+        assert!(
+            r.handle(Event::FromServer(
+                json!({"id":"lean4-ide:3","result":{"sessionId":"late"}})
+            ))
+            .is_empty()
+        );
+        let keep = vec![Action::ToServer(msg::notification(
+            "$/lean/rpc/keepAlive",
+            json!({"uri":"file:///F.lean","sessionId":"second"}),
+        ))];
+        assert_eq!(r.handle(Event::Tick), keep);
+        assert_eq!(r.handle(Event::Tick), keep);
+        assert_eq!(r.sessions.len(), 1);
+        assert!(r.handle(Event::PageClosed(2)).is_empty());
+        assert!(r.handle(Event::Tick).is_empty());
     }
 }
