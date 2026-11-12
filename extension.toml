@@ -1,13 +1,13 @@
-id = "lean4"
-name = "Lean 4"
-description = "Lean 4 support."
+id = "lean4-ide"
+name = "Lean 4 IDE"
 version = "0.4.0"
 schema_version = 1
-authors = ["owlx56 <owlx365@gmail.com>"]
-repository = "https://github.com/owlx56/zed-lean4"
+description = "Lean 4 support with goal state and a browser infoview."
+repository = "https://github.com/jonaprieto/zed-lean4"
+authors = ["owlx56 <owlx365@gmail.com>", "Jonathan Prieto-Cubides <prieto.jona@gmail.com>"]
 snippets = "snippets/lean 4.json"
 
-[language_servers.lean4-lsp]
+[language_servers.lean4-ide]
 name = "Lean4 Language Server"
 languages = ["Lean 4"]
 

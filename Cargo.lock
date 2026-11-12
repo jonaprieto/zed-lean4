@@ -324,7 +324,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
-name = "lean4"
+name = "lean4-ide"
 version = "0.4.0"
 dependencies = [
  "zed_extension_api",

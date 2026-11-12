@@ -38,7 +38,7 @@ impl zed::Extension for Lean4Extension {
             binary, settings, ..
         } = LspSettings::for_worktree(language_server_id.as_ref(), worktree)?;
 
-        // Check lsp.lean4-lsp.binary
+        // Check lsp.lean4-ide.binary
         if let Some(binary) = binary
             && let Some(path) = binary.path
         {
@@ -88,7 +88,7 @@ impl zed::Extension for Lean4Extension {
             });
         }
 
-        // Check lsp.lean4-lsp.settings
+        // Check lsp.lean4-ide.settings
         let elan_auto_install = settings
             .as_ref()
             .and_then(|s| s.get("elan_auto_install"))
@@ -97,7 +97,7 @@ impl zed::Extension for Lean4Extension {
 
         if !elan_auto_install {
             return Err(
-                "Failed to find lake in PATH or ELAN_HOME/default path. Enable lsp.lean4-lsp.settings.elan_auto_install or configure lsp.lean4-lsp.binary.path."
+                "Failed to find lake in PATH or ELAN_HOME/default path. Enable lsp.lean4-ide.settings.elan_auto_install or configure lsp.lean4-ide.binary.path."
                     .into(),
             );
         }

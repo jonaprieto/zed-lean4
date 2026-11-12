@@ -1,4 +1,6 @@
-# Zed Lean 4
+# Lean 4 IDE for Zed
+
+This is a fork of owlx56/zed-lean4.
 
 A [Lean(4) Theorem Prover](https://lean-lang.org/) extension for [Zed](https://zed.dev).
 
@@ -22,16 +24,16 @@ lean --version
 
 ### Abbreviation
 
-- Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/owlx56/zed-lean4/blob/main/snippets/lean%204.json).
+- Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
 
 ### Nested Lean project
 
-- If the Zed worktree is a parent directory of a Lean project, set `lsp.lean4-lsp.settings.lean_project_dir` to the project directory containing `lakefile.toml` (or `lakefile.lean`). Relative paths are resolved from the worktree root; absolute paths are also supported. This starts an automatically detected Lake with `--dir` so project dependencies such as Mathlib are available.
-- A configured `lsp.lean4-lsp.binary` takes precedence over `lean_project_dir`. Omit `binary` to detect Lake automatically; with an explicit binary, include `"--dir", "/path/to/project"` before `"serve"` in `binary.arguments`.
+- If the Zed worktree is a parent directory of a Lean project, set `lsp.lean4-ide.settings.lean_project_dir` to the project directory containing `lakefile.toml` (or `lakefile.lean`). Relative paths are resolved from the worktree root; absolute paths are also supported. This starts an automatically detected Lake with `--dir` so project dependencies such as Mathlib are available.
+- A configured `lsp.lean4-ide.binary` takes precedence over `lean_project_dir`. Omit `binary` to detect Lake automatically; with an explicit binary, include `"--dir", "/path/to/project"` before `"serve"` in `binary.arguments`.
 
 ### Installation
 
-- Firstly, the extension will check `path` and `arguments` in `lsp.lean4-lsp.binary` settings. Then it will search `lake` in `$PATH`, try `$ELAN_HOME` and default directory.
+- Firstly, the extension will check `path` and `arguments` in `lsp.lean4-ide.binary` settings. Then it will search `lake` in `$PATH`, try `$ELAN_HOME` and default directory.
 - If Lean 4 is not detected, this extension can automatically install elan with default toolchain. To enable this feature, you must set `"elan_auto_install"` to `true`. You can also specify the default toolchain by setting `"elan_default_toolchain"` to `"stable"`, `"nightly"` or `"v4.28.0"`.
 - During installation, the extension will automatically add `~/.elan` to your $PATH. The Lean toolchain can be completely removed by running `elan self uninstall`.
 
@@ -41,7 +43,7 @@ lean --version
 {
   "semantic_tokens": "combined",
   "lsp": {
-    "lean4-lsp": {
+    "lean4-ide": {
       "binary": {
         "path": "/path/to/your/.elan/bin/lake",
         "arguments": ["--dir", "/path/to/your/worktree/formalization", "serve", "--"]

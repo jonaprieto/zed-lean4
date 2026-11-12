@@ -1,5 +1,5 @@
 [package]
-name = "lean4"
+name = "lean4-ide"
 version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
