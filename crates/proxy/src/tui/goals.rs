@@ -10,6 +10,13 @@ const PREFIX: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
 const INACCESSIBLE: Style = Style::new().add_modifier(Modifier::DIM);
 const INSERTED: Style = Style::new().fg(Color::Black).bg(Color::Green);
 const REMOVED: Style = Style::new().fg(Color::Black).bg(Color::Red);
+const KEYWORD: Style = Style::new().fg(Color::Magenta);
+const LITERAL: Style = Style::new().fg(Color::Green);
+
+const KEYWORDS: &[&str] = &[
+    "fun", "λ", "let", "have", "show", "from", "by", "do", "match", "with", "if", "then", "else",
+    "at", "in", "Type", "Sort", "Prop", "forall", "exists", "∀", "∃", "∃!", "Π", "Σ",
+];
 
 /// The plain text of a `TaggedText`.
 pub fn text(t: &Value) -> String {
@@ -54,6 +61,12 @@ pub fn goal_text(goal: &Value) -> String {
 /// The goal's lines: case name, hypotheses and the target, colored like the infoview.
 pub fn goal_lines(goal: &Value) -> Vec<Line<'static>> {
     let mut out = Vec::new();
+    let locals: Vec<&str> = goal["hyps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(names)
+        .collect();
     if let Some(case) = goal["userName"].as_str() {
         out.push(Line::from(vec![
             Span::styled("case ", INACCESSIBLE),
@@ -75,17 +88,17 @@ pub fn goal_lines(goal: &Value) -> Vec<Line<'static>> {
             head.push(Span::styled(name.to_owned(), style.patch(mark)));
         }
         head.push(Span::raw(" : "));
-        let mut lines = typeset(head, &hyp["type"]);
+        let mut lines = typeset(head, &hyp["type"], &locals);
         if !hyp["val"].is_null() {
             let last = lines.pop().unwrap_or_default();
             let mut spans = last.spans;
             spans.push(Span::raw(" := "));
-            lines.extend(typeset(spans, &hyp["val"]));
+            lines.extend(typeset(spans, &hyp["val"], &locals));
         }
         out.extend(lines);
     }
     let target = vec![Span::styled(prefix(goal), PREFIX.patch(marked(goal)))];
-    out.extend(typeset(target, &goal["type"]));
+    out.extend(typeset(target, &goal["type"], &locals));
     out
 }
 
@@ -115,20 +128,90 @@ fn marked(v: &Value) -> Style {
 }
 
 /// `head` followed by `t`, split into lines at the pretty printer's newlines.
-fn typeset(head: Vec<Span<'static>>, t: &Value) -> Vec<Line<'static>> {
+/// Text outside a diff is highlighted, with the goal's `locals` colored like hypotheses.
+fn typeset(head: Vec<Span<'static>>, t: &Value, locals: &[&str]) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(head)];
     runs(t, Style::new(), &mut |s, style| {
         for (i, part) in s.split('\n').enumerate() {
             if i > 0 {
                 lines.push(Line::default());
             }
-            if !part.is_empty() {
-                let line = lines.last_mut().expect("starts with the head");
-                line.spans.push(Span::styled(part.to_owned(), style));
+            let spans = &mut lines.last_mut().expect("starts with the head").spans;
+            if style == Style::new() {
+                highlight(part, locals, spans);
+            } else if !part.is_empty() {
+                spans.push(Span::styled(part.to_owned(), style));
             }
         }
     });
     lines
+}
+
+/// Lean tokens of `s` as spans: keywords, number and string literals, and locals.
+// ponytail: a lexer, not a parser; bound variables (`fun x =>`) stay uncolored.
+fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {
+    let chars: Vec<char> = s.chars().collect();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let start = i;
+        let style = if c.is_alphabetic() || c == '_' || c == '«' {
+            i += 1;
+            while i < chars.len() {
+                let d = chars[i];
+                let dot = d == '.' && chars.get(i + 1).is_some_and(|n| n.is_alphabetic());
+                if d.is_alphanumeric() || "_'!?✝»".contains(d) || dot {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let word: String = chars[start..i].iter().collect();
+            if KEYWORDS.contains(&word.as_str()) {
+                Some(KEYWORD)
+            } else if locals.contains(&word.as_str()) {
+                Some(HYP)
+            } else {
+                None
+            }
+        } else if c.is_ascii_digit() {
+            i += 1;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric()
+                    || chars[i] == '.' && chars.get(i + 1).is_some_and(char::is_ascii_digit))
+            {
+                i += 1;
+            }
+            Some(LITERAL)
+        } else if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(chars.len());
+            Some(LITERAL)
+        } else if c == '∀' || c == '∃' {
+            i += if chars.get(i + 1) == Some(&'!') { 2 } else { 1 };
+            Some(KEYWORD)
+        } else {
+            i += 1;
+            None
+        };
+        let token: String = chars[start..i].iter().collect();
+        match style {
+            Some(style) => {
+                if !plain.is_empty() {
+                    out.push(Span::raw(std::mem::take(&mut plain)));
+                }
+                out.push(Span::styled(token, style));
+            }
+            None => plain.push_str(&token),
+        }
+    }
+    if !plain.is_empty() {
+        out.push(Span::raw(plain));
+    }
 }
 
 /// Calls `f` with each text run of `t` and the diff style of its innermost tag.
@@ -195,6 +278,39 @@ mod tests {
         assert_eq!(lines[3].spans[0].style, PREFIX);
         assert_eq!(lines[3].spans[1].style, INSERTED);
         assert_eq!(lines[3].spans[2].style, Style::new());
+    }
+
+    #[test]
+    fn highlight_colors_keywords_literals_and_locals() {
+        let mut spans = Vec::new();
+        highlight(
+            "∀ (k : Nat), fun x => n + 10 = Nat.succ k ∧ s = \"a\\\"b\" ∃! y",
+            &["n", "s"],
+            &mut spans,
+        );
+        let got: Vec<(&str, Style)> = spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("∀", KEYWORD),
+                (" (k : Nat), ", Style::new()),
+                ("fun", KEYWORD),
+                (" x => ", Style::new()),
+                ("n", HYP),
+                (" + ", Style::new()),
+                ("10", LITERAL),
+                (" = Nat.succ k ∧ ", Style::new()),
+                ("s", HYP),
+                (" = ", Style::new()),
+                ("\"a\\\"b\"", LITERAL),
+                (" ", Style::new()),
+                ("∃!", KEYWORD),
+                (" y", Style::new()),
+            ]
+        );
     }
 
     #[test]
