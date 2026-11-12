@@ -47,3 +47,13 @@ jobs:
           chmod +x zed-extension
           mkdir -p /tmp/ext-scratch /tmp/ext-output
           ./zed-extension --source-dir . --scratch-dir /tmp/ext-scratch --output-dir /tmp/ext-output
+
+  lean-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          curl -sSfL https://elan.lean-lang.org/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - run: cd tests/fixtures/lean && lake build Fixture
+      - run: cargo test -p lean4-ide-proxy --test lean_e2e -- --ignored
