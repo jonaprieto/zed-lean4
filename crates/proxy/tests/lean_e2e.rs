@@ -1,11 +1,17 @@
 //! Runs the built proxy in front of a real `lake serve` on tests/fixtures/lean.
 //! Needs elan on PATH: `cargo test -p lean4-ide-proxy --test lean_e2e -- --ignored`.
+use futures_util::{SinkExt, StreamExt};
 use lean4_ide_proxy::codec;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::BufReader;
+use tokio::net::TcpStream;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,6 +29,7 @@ struct Lsp {
     tx: ChildStdin,
     rx: BufReader<ChildStdout>,
     next: i64,
+    show_url: Option<String>,
 }
 
 impl Lsp {
@@ -44,6 +51,7 @@ impl Lsp {
             tx,
             rx,
             next: 0,
+            show_url: None,
         };
         let root = format!("file://{}", fixture_dir().display());
         lsp.request(
@@ -81,9 +89,20 @@ impl Lsp {
         .await
         .unwrap();
         let rx = &mut self.rx;
+        let tx = &mut self.tx;
+        let show_url = &mut self.show_url;
         let read = async {
             loop {
                 let m = codec::read(&mut *rx).await.unwrap().expect("proxy closed");
+                if m["method"] == "window/showDocument" {
+                    *show_url = m["params"]["uri"].as_str().map(str::to_owned);
+                    codec::write(
+                        &mut *tx,
+                        &json!({"jsonrpc":"2.0","id":m["id"],"result":{"success":true}}),
+                    )
+                    .await
+                    .unwrap();
+                }
                 if m.get("id") == Some(&json!(id)) && m.get("method").is_none() {
                     return m;
                 }
@@ -94,6 +113,41 @@ impl Lsp {
             Err(_) => panic!("no response to {method} within 120s"),
         }
     }
+}
+
+type InfoviewSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+async fn page_call(socket: &mut InfoviewSocket, id: &str, name: &str, args: Value) -> Value {
+    socket
+        .send(Message::text(
+            json!({"id":id,"call":name,"args":args}).to_string(),
+        ))
+        .await
+        .unwrap();
+    loop {
+        let message = socket.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let response: Value = serde_json::from_str(text.as_str()).unwrap();
+        if response["id"] == id {
+            assert!(response.get("error").is_none(), "{response}");
+            return response["result"].clone();
+        }
+    }
+}
+
+fn tagged_text(value: &Value) -> String {
+    if let Some(text) = value["text"].as_str() {
+        return text.into();
+    }
+    if let Some(parts) = value["append"].as_array() {
+        return parts.iter().map(tagged_text).collect();
+    }
+    if let Some(tag) = value["tag"].as_array() {
+        return tagged_text(&tag[1]);
+    }
+    panic!("unexpected TaggedText: {value}");
 }
 
 #[tokio::test]
@@ -119,4 +173,77 @@ async fn hover_shows_goal_on_tactic() {
         value.ends_with("```lean\nn : Nat\n⊢ n + 0 = n\n```"),
         "{value}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn infoview_gets_interactive_goals() {
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut lsp = Lsp::start().await;
+        let position = json!({
+            "textDocument": {"uri": fixture_uri()},
+            "position": {"line": 1, "character": 2}
+        });
+        lsp.request("textDocument/documentHighlight", position.clone())
+            .await;
+        let opened = lsp
+            .request(
+                "workspace/executeCommand",
+                json!({"command": "lean4-ide.openInfoview"}),
+            )
+            .await;
+        assert!(opened.get("error").is_none(), "{opened}");
+        let url = lsp.show_url.as_deref().expect("window/showDocument URL");
+        let (origin, query) = url.split_once("/?").unwrap();
+        let ws_url = format!("{}/ws?{query}", origin.replacen("http:", "ws:", 1));
+        let mut request = ws_url.into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+        let (mut socket, _) = connect_async(request).await.unwrap();
+        let hello = page_call(&mut socket, "e2e:1", "hello", json!([])).await;
+        assert!(
+            hello["initializeResult"]["capabilities"].is_object(),
+            "{hello}"
+        );
+        let session = page_call(
+            &mut socket,
+            "e2e:2",
+            "createRpcSession",
+            json!([fixture_uri()]),
+        )
+        .await;
+        assert!(session.is_string(), "{session}");
+        let rpc = json!({
+            "textDocument": position["textDocument"],
+            "position": position["position"],
+            "sessionId": session,
+            "method": "Lean.Widget.getInteractiveGoals",
+            "params": position
+        });
+        let goals = page_call(
+            &mut socket,
+            "e2e:3",
+            "sendClientRequest",
+            json!([fixture_uri(), "$/lean/rpc/call", rpc]),
+        )
+        .await;
+        let goal = &goals["goals"][0];
+        let has_v1_ref = goal["ctx"].get("__rpcref").is_some();
+        assert!(
+            has_v1_ref,
+            "Lean must encode RPC refs in wire format v1: {goals}"
+        );
+        let hyps = goal["hyps"].as_array().unwrap();
+        let has_n = hyps.iter().any(|hyp| {
+            let names = hyp["names"].as_array().unwrap();
+            names.contains(&json!("n"))
+        });
+        assert!(has_n, "{goals}");
+        assert_eq!(tagged_text(&goal["type"]), "n + 0 = n");
+        page_call(&mut socket, "e2e:4", "closeRpcSession", json!([session])).await;
+        socket.close(None).await.unwrap();
+    })
+    .await
+    .expect("infoview e2e timed out");
 }
