@@ -18,10 +18,14 @@ pub enum Action {
 #[derive(Default)]
 pub struct Router {
     next_id: u64,
-    /// Proxy plainGoal id -> client hover id key.
-    goal_for: HashMap<String, String>,
+    /// Proxy request id -> response destination.
+    pending: HashMap<String, Pending>,
     /// Client hover id key -> parts received so far.
     hovers: HashMap<String, HoverJoin>,
+}
+
+enum Pending {
+    Goal(String),
 }
 
 struct HoverJoin {
@@ -59,7 +63,7 @@ impl Router {
                 response: None,
                 goal: None,
             };
-            self.goal_for.insert(id, key.clone());
+            self.pending.insert(id, Pending::Goal(key.clone()));
             self.hovers.insert(key, join);
             return vec![Action::ToServer(m), Action::ToServer(goal_req)];
         }
@@ -80,7 +84,7 @@ impl Router {
             .as_str()
             .filter(|id| id.starts_with(msg::PROXY_ID_PREFIX))
         {
-            let Some(key) = self.goal_for.remove(own) else {
+            let Some(Pending::Goal(key)) = self.pending.remove(own) else {
                 return vec![];
             };
             if let Some(join) = self.hovers.get_mut(&key) {
@@ -91,7 +95,9 @@ impl Router {
         let key = msg::id_key(&m["id"]);
         match self.hovers.get_mut(&key) {
             Some(_) if m.get("error").is_some() => {
-                self.hovers.remove(&key);
+                if let Some(join) = self.hovers.remove(&key) {
+                    self.pending.remove(&join.goal_id);
+                }
                 vec![Action::ToClient(m)]
             }
             Some(join) => {
@@ -320,6 +326,35 @@ mod tests {
         assert_eq!(
             r.handle(Event::FromServer(goal_resp("lean4-ide:1"))),
             vec![]
+        );
+    }
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+
+    #[test]
+    fn goal_pending_is_removed_on_early_hover_error() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(
+            json!({"id": 7, "method": "textDocument/hover",
+            "params": {"textDocument": {"uri": "file:///F.lean"},
+            "position": {"line": 1, "character": 2}}}),
+        ));
+        assert!(matches!(
+            r.pending.get("lean4-ide:1"),
+            Some(Pending::Goal(_))
+        ));
+        r.handle(Event::FromServer(
+            json!({"id": 7, "error": {"code": -32800}}),
+        ));
+        assert!(r.pending.is_empty());
+        assert!(
+            r.handle(Event::FromServer(
+                json!({"id": "lean4-ide:1", "result": null})
+            ))
+            .is_empty()
         );
     }
 }
