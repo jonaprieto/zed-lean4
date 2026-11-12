@@ -79,7 +79,12 @@ lines wrap with a hanging indent.
 The mouse works too: the wheel scrolls, a click on a header folds it, and a
 click on a term in a goal shows its type and docstring below the goals. With a
 term picked, `d` and `t` jump Zed to its definition or its type, and `Esc`
-closes the panel. Hold Shift to select text with the mouse instead. Lean widgets render
+closes the panel. Hold Shift to select text with the mouse instead.
+
+Messages at the cursor are Lean's interactive messages: expressions in them are
+highlighted and clickable, embedded goals render as goals, and traces fold, with
+children Lean sends on demand fetched when you open them. `a` (all messages)
+lists the plain published diagnostics for the whole file. Lean widgets render
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
 

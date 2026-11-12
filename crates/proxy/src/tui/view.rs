@@ -38,6 +38,10 @@ pub struct Row {
     /// The innermost foldable block the row belongs to (its own key on a header).
     pub fold: Option<String>,
     pub header: bool,
+    /// On a header: whether its body shows.
+    pub open: bool,
+    /// On a header whose children Lean sends on demand: the reference to ask for them.
+    pub load: Option<Value>,
 }
 
 /// Builds rows, leaving out the bodies of folded blocks.
@@ -68,14 +72,22 @@ impl<'a> Rows<'a> {
                 links,
                 fold,
                 header: false,
+                open: false,
+                load: None,
             });
         }
     }
 
     /// Starts a block whose header is `label` with a fold marker.
     pub fn open(&mut self, key: String, label: impl Into<Text>) {
+        self.open_as(key, label, false);
+    }
+
+    /// Starts a block that is folded by default when `collapsed`; toggling
+    /// its key flips that default.
+    pub fn open_as(&mut self, key: String, label: impl Into<Text>, collapsed: bool) {
         if self.hidden.is_none() {
-            let folded = self.folded.contains(&key);
+            let folded = collapsed != self.folded.contains(&key);
             let Text {
                 mut line,
                 mut links,
@@ -90,12 +102,28 @@ impl<'a> Rows<'a> {
                 links,
                 fold: Some(key.clone()),
                 header: true,
+                open: !folded,
+                load: None,
             });
             if folded {
                 self.hidden = Some(self.open.len() + 1);
             }
         }
         self.open.push(key);
+    }
+
+    /// Marks the current block's header as needing `children` from Lean. The
+    /// header may be followed by its own continuation lines.
+    pub fn load(&mut self, children: Value) {
+        let key = self.open.last();
+        if let Some(row) = self
+            .rows
+            .iter_mut()
+            .rev()
+            .find(|r| r.header && r.fold.as_ref() == key)
+        {
+            row.load = Some(children);
+        }
     }
 
     pub fn close(&mut self) {

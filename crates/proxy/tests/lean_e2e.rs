@@ -345,3 +345,92 @@ async fn tui_shows_goal_from_real_lean() {
     .await
     .expect("tui e2e timed out");
 }
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn tui_shows_interactive_messages_from_real_lean() {
+    use lean4_ide_proxy::tui::{
+        app::{App, Effect},
+        socket_request,
+    };
+    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn screen(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..20)
+            .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut lsp = Lsp::start().await;
+        let uri = format!("file://{}/Check.lean", fixture_dir().display());
+        lsp.notify(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri, "languageId": "lean4", "version": 1, "text": "#check Nat.succ\n"}}),
+        )
+        .await;
+        let opened = lsp
+            .request(
+                "workspace/executeCommand",
+                json!({"command": "lean4-ide.openInfoview"}),
+            )
+            .await;
+        assert!(opened.get("error").is_none(), "{opened}");
+        let url = lsp.show_url.clone().expect("window/showDocument URL");
+        let (mut socket, _) = connect_async(socket_request(&url).unwrap()).await.unwrap();
+        let pid = std::process::id();
+        let mut app = App::new(format!("tui-{pid}"));
+        let hello_id = format!("tui-{pid}:1");
+        let mut effects = app.connected(url);
+        let mut clicked = false;
+        loop {
+            for effect in effects.drain(..) {
+                let Effect::Send(m) = effect else {
+                    panic!("unexpected effect {effect:?}")
+                };
+                socket.send(Message::text(m.to_string())).await.unwrap();
+            }
+            let text = screen(&app);
+            // The detail panel shows the clicked binder with its type.
+            if clicked && text.lines().any(|l| l.trim_end() == "n : Nat") {
+                return;
+            }
+            // Published diagnostics show first; the click works once the
+            // interactive ones replace them.
+            if !clicked
+                && let Some(row) = text.lines().position(|l| l.contains("information: Nat.succ"))
+            {
+                let line = text.lines().nth(row).unwrap();
+                // `#check` tags the binder `n`, not the constant's name.
+                let column = line[..line.find("(n").unwrap() + 1].chars().count();
+                effects = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: column.try_into().unwrap(),
+                    row: row.try_into().unwrap(),
+                    modifiers: KeyModifiers::NONE,
+                });
+                if !effects.is_empty() {
+                    clicked = true;
+                    continue;
+                }
+            }
+            let msg = socket.next().await.unwrap().unwrap();
+            let m: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            effects = app.on_message(&m);
+            if m["id"] == hello_id.as_str() {
+                lsp.request(
+                    "textDocument/documentHighlight",
+                    json!({"textDocument": {"uri": uri}, "position": {"line": 0, "character": 1}}),
+                )
+                .await;
+            }
+        }
+    })
+    .await
+    .expect("tui message e2e timed out");
+}

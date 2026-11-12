@@ -14,7 +14,7 @@ use ratatui::{
 use serde_json::{Value, json};
 
 use super::{
-    goals,
+    goals, messages,
     view::{self, Rows, Text},
 };
 
@@ -76,6 +76,11 @@ pub struct App {
     pinned: bool,
     goals: Option<Held>,
     term_goal: Option<Held>,
+    /// Interactive diagnostics on the shown line.
+    messages: Option<Held>,
+    /// Trace children fetched so far, by reference, and the requests fetching them.
+    lazy: HashMap<String, Value>,
+    loading: HashMap<String, String>,
     /// RPC session per file URI.
     sessions: HashMap<String, Value>,
     /// Pending `createRpcSession` calls and the file each is for.
@@ -99,6 +104,7 @@ pub struct App {
     subscribe: Option<String>,
     goal: Option<String>,
     term: Option<String>,
+    diags: Option<String>,
     insert: Option<String>,
     popup: Option<String>,
     goto: Option<String>,
@@ -134,6 +140,9 @@ impl App {
             pinned: false,
             goals: None,
             term_goal: None,
+            messages: None,
+            lazy: HashMap::new(),
+            loading: HashMap::new(),
             sessions: HashMap::new(),
             connects: HashMap::new(),
             inflight: HashMap::new(),
@@ -151,6 +160,7 @@ impl App {
             subscribe: None,
             goal: None,
             term: None,
+            diags: None,
             insert: None,
             popup: None,
             goto: None,
@@ -175,6 +185,7 @@ impl App {
         self.sessions.clear();
         self.connects.clear();
         self.inflight.clear();
+        self.loading.clear();
         for slot in self.pending() {
             *slot = None;
         }
@@ -221,6 +232,23 @@ impl App {
         {
             self.sessions.remove(uri);
         }
+        if let Some(p) = self.loading.remove(id) {
+            if let Some(error) = m.get("error") {
+                self.status = error["message"].as_str().map(String::from);
+                return vec![];
+            }
+            // Children for the messages on screen; anything older only holds references.
+            let current = self
+                .messages
+                .as_ref()
+                .map(|h| (h.uri.clone(), h.session.clone()));
+            if self.asked.is_some() && self.asked == current {
+                self.lazy.insert(p, m["result"].clone());
+                return vec![];
+            }
+            let stale = self.held(m.get("result").cloned());
+            return self.release(stale);
+        }
         if !self
             .pending()
             .iter()
@@ -231,12 +259,13 @@ impl App {
             return self.release(stale);
         }
         if let Some(error) = m.get("error") {
-            let was_lookup = take(&mut self.goal, id) || take(&mut self.term, id);
+            let was_lookup =
+                take(&mut self.goal, id) || take(&mut self.term, id) || take(&mut self.diags, id);
             for slot in self.pending() {
                 take(slot, id);
             }
             if was_lookup && error["code"].as_i64() == Some(NEEDS_RECONNECT) {
-                (self.goal, self.term) = (None, None);
+                (self.goal, self.term, self.diags) = (None, None, None);
                 return self.show(self.location.clone());
             }
             // An edit overtook the request or it was cancelled: not worth a status.
@@ -270,6 +299,21 @@ impl App {
             let old = std::mem::replace(&mut self.goals, held);
             let mut effects = self.unpick_if_gone();
             effects.extend(self.release(old));
+            return effects;
+        } else if take(&mut self.diags, id) {
+            let held = self.held(result.is_array().then(|| result.clone()));
+            let old = self.replace_messages(held);
+            let mut effects = self.unpick_if_gone();
+            effects.extend(self.release(old));
+            let open: Vec<Value> = self
+                .rows()
+                .into_iter()
+                .filter(|r| r.open)
+                .filter_map(|r| r.load)
+                .collect();
+            for children in open {
+                effects.extend(self.fetch(children));
+            }
             return effects;
         } else if take(&mut self.term, id) {
             let held = self.held((!result.is_null()).then(|| result.clone()));
@@ -319,7 +363,7 @@ impl App {
             }
             KeyCode::Char('g') => self.select(0),
             KeyCode::Char('G') => self.select(usize::MAX),
-            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Tab => self.toggle_fold(),
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Tab => return self.toggle_fold(),
             _ => {}
         }
         vec![]
@@ -486,8 +530,7 @@ impl App {
         // A header folds unless the click lands on a term in it.
         let on_marker = char.is_some_and(|c| c < view::MARKER_WIDTH);
         if row.header && (link.is_none() || on_marker) {
-            self.toggle_fold();
-            return vec![];
+            return self.toggle_fold();
         }
         let Some(link) = link.cloned() else {
             return self.unpick();
@@ -543,13 +586,32 @@ impl App {
         self.release(popup)
     }
 
-    /// The file and session of the shown result that holds `info`.
+    /// The file and session of the shown result that holds `info`; fetched
+    /// trace children belong to the messages' session.
     fn owner(&self, info: &Value) -> Option<(String, Value)> {
-        [&self.goals, &self.term_goal]
+        let origin = |h: &Held| (h.uri.clone(), h.session.clone());
+        let shown = [&self.goals, &self.term_goal, &self.messages]
             .into_iter()
-            .flatten()
-            .find(|h| goals::holds(&h.value, info))
-            .map(|h| (h.uri.clone(), h.session.clone()))
+            .flatten();
+        if let Some(held) = shown.into_iter().find(|h| goals::holds(&h.value, info)) {
+            return Some(origin(held));
+        }
+        let messages = self.messages.as_ref()?;
+        let fetched = self.lazy.values().any(|v| goals::holds(v, info));
+        fetched.then(|| origin(messages))
+    }
+
+    /// Shows `new` messages and hands back the old ones together with the
+    /// trace children fetched for them, which hold references of the same session.
+    fn replace_messages(&mut self, new: Option<Held>) -> Option<Held> {
+        let mut old = std::mem::replace(&mut self.messages, new);
+        // Fetches for the old messages now answer as stale replies and are released.
+        self.loading.clear();
+        let lazy: Vec<Value> = std::mem::take(&mut self.lazy).into_values().collect();
+        if let Some(old) = &mut old {
+            old.value = json!([old.value.take(), lazy]);
+        }
+        old
     }
 
     /// Drops the picked subterm once no shown result holds its reference.
@@ -598,8 +660,9 @@ impl App {
     }
 
     /// The ids of requests still waiting for a reply.
-    fn pending(&mut self) -> [&mut Option<String>; 8] {
+    fn pending(&mut self) -> [&mut Option<String>; 9] {
         [
+            &mut self.diags,
             &mut self.popup,
             &mut self.goto,
             &mut self.open,
@@ -630,15 +693,17 @@ impl App {
     fn show(&mut self, location: Option<Value>) -> Vec<Effect> {
         self.location = location;
         let Some(location) = self.location.clone() else {
-            (self.goal, self.term) = (None, None);
-            let (goals, term) = (self.goals.take(), self.term_goal.take());
-            let mut effects = self.release(goals);
-            effects.extend(self.release(term));
-            return effects;
+            (self.goal, self.term, self.diags) = (None, None, None);
+            let held = [
+                self.goals.take(),
+                self.term_goal.take(),
+                self.replace_messages(None),
+            ];
+            return held.into_iter().flat_map(|h| self.release(h)).collect();
         };
         let uri = location["uri"].as_str().unwrap_or_default().to_owned();
         let Some(session) = self.sessions.get(&uri).cloned() else {
-            (self.goal, self.term) = (None, None);
+            (self.goal, self.term, self.diags) = (None, None, None);
             if self.connects.values().any(|u| *u == uri) {
                 return vec![];
             }
@@ -655,9 +720,38 @@ impl App {
         );
         let (term_id, term) =
             self.rpc(&uri, &session, "Lean.Widget.getInteractiveTermGoal", params);
+        let line = location["range"]["start"]["line"]
+            .as_u64()
+            .unwrap_or_default();
+        let range = json!({"lineRange":{"start":line,"end":line + 1}});
+        let (diags_id, diags) = self.rpc(
+            &uri,
+            &session,
+            "Lean.Widget.getInteractiveDiagnostics",
+            range,
+        );
+        self.diags = Some(diags_id);
         self.goal = Some(goal_id);
         self.term = Some(term_id);
-        vec![goal, term]
+        vec![goal, term, diags]
+    }
+
+    /// Asks Lean for the children of a lazily sent trace node.
+    fn fetch(&mut self, children: Value) -> Vec<Effect> {
+        let Some(p) = goals::ref_key(&children).map(String::from) else {
+            return vec![];
+        };
+        let held = self.messages.as_ref();
+        let Some((uri, session)) = held.map(|h| (h.uri.clone(), h.session.clone())) else {
+            return vec![];
+        };
+        if self.loading.values().any(|q| *q == p) {
+            return vec![];
+        }
+        let method = "Lean.Widget.lazyTraceChildrenToInteractive";
+        let (id, call) = self.rpc(&uri, &session, method, children);
+        self.loading.insert(id, p);
+        vec![call]
     }
 
     fn held(&self, value: Option<Value>) -> Option<Held> {
@@ -720,20 +814,30 @@ impl App {
     }
 
     /// Folds or unfolds the innermost block around the selected row.
-    fn toggle_fold(&mut self) {
+    /// Folds or unfolds the innermost block around the selected row, fetching
+    /// trace children Lean has not sent yet.
+    fn toggle_fold(&mut self) -> Vec<Effect> {
         let rows = self.rows();
         // New goals or messages may have left fewer rows than the selection.
         self.selected = self.selected.min(rows.len().saturating_sub(1));
         let Some(key) = rows.get(self.selected).and_then(|r| r.fold.clone()) else {
-            return;
+            return vec![];
         };
         if !self.folded.remove(&key) {
             self.folded.insert(key.clone());
         }
-        self.selected = rows
-            .iter()
-            .position(|r| r.header && r.fold.as_ref() == Some(&key))
-            .unwrap_or(self.selected);
+        let Some(header) = rows
+            .into_iter()
+            .enumerate()
+            .find(|(_, r)| r.header && r.fold.as_ref() == Some(&key))
+        else {
+            return vec![];
+        };
+        self.selected = header.0;
+        match header.1.load {
+            Some(children) if !header.1.open => self.fetch(children),
+            _ => vec![],
+        }
     }
 
     fn rows(&self) -> Vec<view::Row> {
@@ -811,11 +915,28 @@ impl App {
             })
             .collect();
         let title = if self.all { "All messages" } else { "Messages" };
+        // At the cursor, Lean's interactive messages replace the plain ones.
+        let interactive = self.messages.as_ref().filter(|_| !self.all);
+        let interactive = interactive.and_then(|h| h.value.as_array());
+        let count = interactive.map_or(messages.len(), Vec::len);
         rows.push(Line::raw(""));
         rows.open(
             "messages".into(),
-            Line::from(format!("{title} ({})", messages.len()).bold()),
+            Line::from(format!("{title} ({count})").bold()),
         );
+        if let Some(list) = interactive {
+            for (i, d) in list.iter().enumerate() {
+                let at = &d["range"]["start"];
+                let (line, character) = (
+                    at["line"].as_u64().unwrap_or_default() + 1,
+                    &at["character"],
+                );
+                let head = Line::raw(format!("{line}:{character} {}: ", severity(d)));
+                let key = format!("message:{uri}:{line}:{character}:{i}");
+                messages::message(rows, &self.lazy, &key, head, &d["message"]);
+            }
+            return rows.close();
+        }
         for d in messages {
             let at = &d["range"]["start"];
             let mut text = d["message"].as_str().unwrap_or_default().lines().peekable();
@@ -869,6 +990,9 @@ mod tests {
         vec![
             rpc(first, "Lean.Widget.getInteractiveGoals"),
             rpc(first + 1, "Lean.Widget.getInteractiveTermGoal"),
+            json!({"id":format!("tui-1:{}", first + 2),"call":"sendClientRequest","args":[U,"$/lean/rpc/call",
+                {"textDocument":{"uri":U},"position":params["position"],"sessionId":"s1",
+                 "method":"Lean.Widget.getInteractiveDiagnostics","params":{"lineRange":{"start":line,"end":line + 1}}}]}),
         ]
     }
 
@@ -999,14 +1123,14 @@ mod tests {
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}));
         let note = |uri: &str| json!({"event":"gotServerNotification","args":["textDocument/publishDiagnostics",{"uri":uri,"diagnostics":[]}]});
         assert!(app.on_message(&note("file:///p/G.lean")).is_empty());
-        assert_eq!(sent(app.on_message(&note(U))), goal_requests(8, 4, 0));
+        assert_eq!(sent(app.on_message(&note(U))), goal_requests(10, 4, 0));
     }
 
     #[test]
     fn cursor_moves_request_goals_unless_pinned() {
         let mut app = app();
         let moved = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}));
-        assert_eq!(sent(moved), goal_requests(6, 4, 0));
+        assert_eq!(sent(moved), goal_requests(7, 4, 0));
         shows(&app, &["F.lean:5:0"]);
         app.on_key(key('p'));
         let moved = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(7, 1)]}));
@@ -1042,10 +1166,10 @@ mod tests {
         app.on_message(&json!({"id":"tui-1:4","result":goals(&[])}));
         shows(&app, &["▾ Tactic state", "No goals"]);
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
-        app.on_message(&json!({"id":"tui-1:6","result":null}));
+        app.on_message(&json!({"id":"tui-1:7","result":null}));
         hides(&app, "▾ Tactic state");
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
-        app.on_message(&json!({"id":"tui-1:8","result":goals(&["⊢ A", "⊢ B"])}));
+        app.on_message(&json!({"id":"tui-1:10","result":goals(&["⊢ A", "⊢ B"])}));
         shows(&app, &["2 goals", "▾ goal 1", "⊢ A", "", "▾ goal 2", "⊢ B"]);
     }
 
@@ -1057,10 +1181,10 @@ mod tests {
         app.on_message(&json!({"id":"other:6","result":goals(&["⊢ foreign"])}));
         hides(&app, "⊢ old");
         hides(&app, "⊢ foreign");
-        app.on_message(&json!({"id":"tui-1:6","result":goals(&["⊢ new"])}));
+        app.on_message(&json!({"id":"tui-1:7","result":goals(&["⊢ new"])}));
         shows(&app, &["⊢ new"]);
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
-        app.on_message(&json!({"id":"tui-1:8","error":{"code":-32602,"message":"bad params"}}));
+        app.on_message(&json!({"id":"tui-1:10","error":{"code":-32602,"message":"bad params"}}));
         shows(&app, &["⊢ new"]);
         assert_eq!(screen(&app)[19], "bad params");
     }
@@ -1098,7 +1222,7 @@ mod tests {
         app.on_message(&json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":[publish(1, 0, 1, 1, "old")]}]}));
         shows(&app, &["2:0 error: old"]);
         app.connected("http://127.0.0.1:2/?token=t".into());
-        app.on_message(&json!({"id":"tui-1:7","result":[]}));
+        app.on_message(&json!({"id":"tui-1:8","result":[]}));
         hides(&app, "2:0 error: old");
     }
 
@@ -1113,7 +1237,7 @@ mod tests {
         hides(&app, "[pinned]");
         assert_eq!(
             sent(app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}))),
-            goal_requests(6, 4, 0)
+            goal_requests(7, 4, 0)
         );
     }
 
@@ -1148,7 +1272,7 @@ mod tests {
         let mut app = app();
         app.on_key(key('p'));
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(6, 3)]}));
-        assert_eq!(sent(app.on_key(key('p'))), goal_requests(6, 6, 3));
+        assert_eq!(sent(app.on_key(key('p'))), goal_requests(7, 6, 3));
         shows(&app, &["F.lean:7:3"]);
         app.on_key(key('p'));
         assert!(app.on_key(key('p')).is_empty());
@@ -1165,10 +1289,10 @@ mod tests {
         assert_eq!(
             sent(app.on_key(key('c'))),
             [
-                json!({"id":"tui-1:6","call":"insertText","args":["/-\n⊢ A\n\nh : B\n⊢ C\n-/","above",{"textDocument":{"uri":U},"position":{"line":1,"character":2}}]})
+                json!({"id":"tui-1:7","call":"insertText","args":["/-\n⊢ A\n\nh : B\n⊢ C\n-/","above",{"textDocument":{"uri":U},"position":{"line":1,"character":2}}]})
             ]
         );
-        app.on_message(&json!({"id":"tui-1:6","result":{"applied":false,"failureReason":"x"}}));
+        app.on_message(&json!({"id":"tui-1:7","result":{"applied":false,"failureReason":"x"}}));
         assert_eq!(screen(&app)[19], "x");
     }
 
@@ -1251,7 +1375,7 @@ mod tests {
         hides(&app, "h : A");
         // The fold survives new goals for the same case.
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
-        app.on_message(&json!({"id":"tui-1:6","result":two}));
+        app.on_message(&json!({"id":"tui-1:7","result":two}));
         hides(&app, "h : A");
         app.on_key(key(' '));
         shows(&app, &["▾ case pos", "h : A"]);
@@ -1295,16 +1419,16 @@ mod tests {
         let lost = json!({"id":"tui-1:4","error":{"code":-32900,"message":"Outdated RPC session"}});
         assert_eq!(
             sent(app.on_message(&lost)),
-            [json!({"id":"tui-1:6","call":"createRpcSession","args":[U]})]
+            [json!({"id":"tui-1:7","call":"createRpcSession","args":[U]})]
         );
         assert_eq!(screen(&app)[19], KEYS);
         app.disconnected("gone".into());
         app.connected("http://h/".into());
-        app.on_message(&json!({"id":"tui-1:9","result":"s2"}));
+        app.on_message(&json!({"id":"tui-1:99","result":"s2"}));
         let again = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
         assert_eq!(
             sent(again),
-            [json!({"id":"tui-1:9","call":"createRpcSession","args":[U]})]
+            [json!({"id":"tui-1:10","call":"createRpcSession","args":[U]})]
         );
     }
 
@@ -1317,7 +1441,7 @@ mod tests {
         assert_eq!(
             sent(app.on_message(&stale)),
             [
-                json!({"id":"tui-1:8","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                json!({"id":"tui-1:10","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
                 {"uri":U,"sessionId":"s1","refs":[{"__rpcref":"3"}]}]})
             ]
         );
@@ -1326,11 +1450,11 @@ mod tests {
         let at = |uri: &str| json!({"event":"changedCursorLocation","args":[{"uri":uri,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]});
         assert_eq!(
             sent(app.on_message(&at(g))),
-            [json!({"id":"tui-1:9","call":"createRpcSession","args":[g]})]
+            [json!({"id":"tui-1:11","call":"createRpcSession","args":[g]})]
         );
         app.on_message(&at(U));
         assert!(
-            app.on_message(&json!({"id":"tui-1:9","result":"sg"}))
+            app.on_message(&json!({"id":"tui-1:11","result":"sg"}))
                 .is_empty()
         );
         let back = app.on_message(&at(g));
@@ -1347,9 +1471,9 @@ mod tests {
         );
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
         assert_eq!(
-            sent(app.on_message(&json!({"id":"tui-1:6","result":goals(&["⊢ B"])}))),
+            sent(app.on_message(&json!({"id":"tui-1:7","result":goals(&["⊢ B"])}))),
             [
-                json!({"id":"tui-1:8","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                json!({"id":"tui-1:10","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
                 {"uri":U,"sessionId":"s1","refs":[{"p":"7"}]}]})
             ]
         );
@@ -1385,7 +1509,7 @@ mod tests {
         assert_eq!(
             sent(app.on_mouse(click(3, 4))),
             [rpc(
-                "tui-1:6",
+                "tui-1:7",
                 "Lean.Widget.InteractiveDiagnostics.infoToInteractive",
                 json!({"p":"9"})
             )]
@@ -1393,29 +1517,29 @@ mod tests {
         shows(&app, &["Nat.succ"]);
         assert_eq!(screen(&app)[19], PICKED_KEYS);
         app.on_message(
-            &json!({"id":"tui-1:6","result":{"type":{"text":"Nat → Nat"},"doc":"The successor."}}),
+            &json!({"id":"tui-1:7","result":{"type":{"text":"Nat → Nat"},"doc":"The successor."}}),
         );
         shows(&app, &["Nat.succ : Nat → Nat", "The successor."]);
         assert_eq!(
             sent(app.on_key(key('d'))),
             [rpc(
-                "tui-1:7",
+                "tui-1:8",
                 "Lean.Widget.getGoToLocation",
                 json!({"kind":"definition","info":{"p":"9"}})
             )]
         );
         let range = json!({"start":{"line":3,"character":0},"end":{"line":3,"character":4}});
-        let found = json!({"id":"tui-1:7","result":[{"targetUri":"file:///lib/Nat.lean","targetRange":range,"targetSelectionRange":range}]});
+        let found = json!({"id":"tui-1:8","result":[{"targetUri":"file:///lib/Nat.lean","targetRange":range,"targetSelectionRange":range}]});
         assert_eq!(
             sent(app.on_message(&found)),
             [
-                json!({"id":"tui-1:8","call":"showDocument","args":[{"uri":"file:///lib/Nat.lean","selection":range,"takeFocus":true}]})
+                json!({"id":"tui-1:9","call":"showDocument","args":[{"uri":"file:///lib/Nat.lean","selection":range,"takeFocus":true}]})
             ]
         );
-        app.on_message(&json!({"id":"tui-1:8","result":{"success":false}}));
+        app.on_message(&json!({"id":"tui-1:9","result":{"success":false}}));
         assert_eq!(screen(&app)[19], "Zed could not open the location");
         app.on_key(key('t'));
-        app.on_message(&json!({"id":"tui-1:9","result":[]}));
+        app.on_message(&json!({"id":"tui-1:10","result":[]}));
         assert_eq!(screen(&app)[19], "No location found");
         // Esc closes the detail first, then quits.
         assert!(
@@ -1437,9 +1561,9 @@ mod tests {
         screen(&app);
         app.on_mouse(click(2, 4));
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
-        app.on_message(&json!({"id":"tui-1:7","result":goals(&["⊢ B"])}));
+        app.on_message(&json!({"id":"tui-1:8","result":goals(&["⊢ B"])}));
         assert_eq!(screen(&app)[19], KEYS);
-        app.on_message(&json!({"id":"tui-1:6","result":{"type":{"text":"late"}}}));
+        app.on_message(&json!({"id":"tui-1:7","result":{"type":{"text":"late"}}}));
         hides(&app, "A : late");
     }
 
@@ -1454,11 +1578,11 @@ mod tests {
         assert!(app.on_mouse(click(59, 4)).is_empty());
         let picked = sent(app.on_mouse(click(7, 5)));
         assert_eq!(picked[0]["args"][2]["params"], json!({"__rpcref":"9"}));
-        app.on_message(&json!({"id":"tui-1:6","result":{"type":{"tag":[{"info":{"__rpcref":"10"}},{"text":"T"}]}}}));
+        app.on_message(&json!({"id":"tui-1:7","result":{"type":{"tag":[{"info":{"__rpcref":"10"}},{"text":"T"}]}}}));
         assert_eq!(
             sent(app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
             [
-                json!({"id":"tui-1:7","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                json!({"id":"tui-1:8","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
                 {"uri":U,"sessionId":"s1","refs":[{"__rpcref":"10"}]}]})
             ]
         );
@@ -1481,6 +1605,89 @@ mod tests {
         hides(&app, "2:0 error: m0");
         // Clicks outside the body do nothing.
         assert!(app.on_mouse(click(5, 19)).is_empty());
+    }
+
+    #[test]
+    fn interactive_messages_replace_plain_ones_and_load_traces() {
+        let mut app = app();
+        app.on_message(&json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":[publish(1, 2, 1, 2, "plain")]}]}));
+        shows(&app, &["2:2 warning: plain"]);
+        let trace = json!({"tag":[{"trace":{"indent":0,"cls":"Elab.step","msg":{"text":"node"},
+            "collapsed":true,"children":{"lazy":{"p":"5"}}}},{"text":""}]});
+        let diags = json!([
+            {"range":{"start":{"line":1,"character":2},"end":{"line":1,"character":3}},"severity":2,
+             "message":{"append":[{"text":"uses "},{"tag":[{"expr":{"tag":[{"info":{"p":"4"}},{"text":"sorryAx"}]}},{"text":""}]}]}},
+            {"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":1}},"severity":3,"message":trace},
+        ]);
+        app.on_message(&json!({"id":"tui-1:6","result":diags}));
+        shows(
+            &app,
+            &[
+                "▾ Messages (2)",
+                "2:2 warning: uses sorryAx",
+                "▾ 2:0 information:",
+                "▸ [Elab.step] node",
+            ],
+        );
+        hides(&app, "2:2 warning: plain");
+        // Expressions in messages are clickable like goals.
+        let row = screen(&app)
+            .iter()
+            .position(|l| l.contains("sorryAx"))
+            .unwrap();
+        let picked = sent(app.on_mouse(click(22, row.try_into().unwrap())));
+        assert_eq!(picked[0]["args"][2]["params"], json!({"p":"4"}));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Opening the lazy trace asks Lean for its children, once.
+        let row = screen(&app)
+            .iter()
+            .position(|l| l.contains("[Elab.step]"))
+            .unwrap();
+        let fetch = sent(app.on_mouse(click(0, row.try_into().unwrap())));
+        assert_eq!(
+            fetch[0]["args"][2]["method"],
+            "Lean.Widget.lazyTraceChildrenToInteractive"
+        );
+        assert_eq!(fetch[0]["args"][2]["params"], json!({"p":"5"}));
+        shows(&app, &["▾ [Elab.step] node", "  ⋯"]);
+        let id = fetch[0]["id"].clone();
+        app.on_message(&json!({"id":id,"result":[{"text":"child"}]}));
+        shows(&app, &["▾ [Elab.step] node", "child"]);
+        // A refresh replaces the references; the open trace is fetched again.
+        app.on_message(&json!({"event":"changedCursorLocation","args":[loc(1, 2)]}));
+        let refreshed = sent(app.on_message(&json!({"id":"tui-1:11","result":diags})));
+        assert_eq!(refreshed[0]["args"][1], "$/lean/rpc/release");
+        assert_eq!(refreshed[1]["args"][2]["params"], json!({"p":"5"}));
+        app.on_key(key('a'));
+        shows(&app, &["▾ All messages (1)", "2:2 warning: plain"]);
+    }
+
+    #[test]
+    fn lazy_children_from_an_older_session_are_released_not_shown() {
+        let mut app = app();
+        let lazy = |p: &str| {
+            json!([{"range":{"start":{"line":1,"character":0},"end":{"line":1,"character":0}},"severity":3,
+                "message":{"tag":[{"trace":{"indent":0,"cls":"c","msg":{"text":"long\nheader"},
+                "collapsed":false,"children":{"lazy":{"__rpcref":p}}}},{"text":""}]}}])
+        };
+        // An open trace whose header wraps still asks for its children.
+        let fetch = sent(app.on_message(&json!({"id":"tui-1:6","result":lazy("3")})));
+        assert_eq!(fetch[0]["args"][2]["params"], json!({"__rpcref":"3"}));
+        // Lean restarts the worker while the children are in flight.
+        app.on_message(
+            &json!({"id":"tui-1:4","error":{"code":-32900,"message":"Outdated RPC session"}}),
+        );
+        app.on_message(&json!({"id":"tui-1:8","result":"s2"}));
+        // The new session's messages replace the old ones and fetch the open trace again.
+        let refetch = sent(app.on_message(&json!({"id":"tui-1:11","result":lazy("3")})));
+        assert_eq!(refetch[0]["args"][2]["sessionId"], "s2");
+        let late = json!({"id":"tui-1:7","result":[{"tag":[{"expr":{"tag":[{"info":{"__rpcref":"5"}},{"text":"old"}]}},{"text":""}]}]});
+        assert!(
+            app.on_message(&late).is_empty(),
+            "s1 is gone, nothing to release into"
+        );
+        hides(&app, "old");
+        shows(&app, &["▾ [c] long", "header", "  ⋯"]);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! I/O shell for the terminal infoview: discovery, the WebSocket client, keys and redraws.
 pub mod app;
 pub mod goals;
+pub mod messages;
 pub mod view;
 
 use crate::discover;
