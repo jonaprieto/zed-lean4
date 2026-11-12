@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag must match extension.toml version
+        run: |
+          EXT="$(sed -n 's/^version = "\(.*\)"/\1/p' extension.toml | head -1)"
+          test "${GITHUB_REF_NAME#v}" = "$EXT" || { echo "::error::tag $GITHUB_REF_NAME != extension.toml $EXT"; exit 1; }
+      - run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes ""
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  proxy:
+    needs: create
+    strategy:
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build -p lean4-ide-proxy --release --target ${{ matrix.target }}
+      - if: runner.os != 'Windows'
+        run: |
+          tar czf lean4-ide-proxy-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release lean4-ide-proxy
+          gh release upload "$GITHUB_REF_NAME" lean4-ide-proxy-${{ matrix.target }}.tar.gz
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/lean4-ide-proxy.exe -DestinationPath lean4-ide-proxy-${{ matrix.target }}.zip
+          gh release upload "$env:GITHUB_REF_NAME" lean4-ide-proxy-${{ matrix.target }}.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
