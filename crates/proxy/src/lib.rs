@@ -8,6 +8,7 @@ pub mod msg;
 pub mod router;
 mod run;
 pub mod server;
+pub mod tui;
 
 pub use run::run;
 
