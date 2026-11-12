@@ -1,24 +1,16 @@
+mod common;
+
+use common::screen;
 use futures_util::{SinkExt, StreamExt};
-use lean4_ide_proxy::tui::app::{App, Effect};
+use lean4_ide_proxy::tui::{
+    app::{App, Effect},
+    lean,
+};
 use lean4_ide_proxy::{codec, run, server::Bridge, tui::socket_request};
-use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader, duplex, split};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-
-fn screen(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-    let buf = terminal.backend().buffer();
-    (0..20)
-        .map(|y| {
-            let row: String = (0..60).map(|x| buf[(x, y)].symbol()).collect();
-            row.trim_end().to_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 #[tokio::test]
 async fn tui_shows_the_goal_at_the_zed_cursor() {
@@ -44,8 +36,7 @@ async fn tui_shows_the_goal_at_the_zed_cursor() {
                 let result = match m["method"].as_str() {
                     Some("initialize") => json!({"capabilities":{}}),
                     Some("$/lean/rpc/connect") => json!({"sessionId":"s1"}),
-                    Some("$/lean/rpc/call")
-                        if m["params"]["method"] == "Lean.Widget.getInteractiveGoals" =>
+                    Some(lean::RPC_CALL) if m["params"]["method"] == lean::GET_INTERACTIVE_GOALS =>
                     {
                         assert_eq!(m["params"]["sessionId"], "s1");
                         assert_eq!(m["params"]["position"], json!({"line":1,"character":2}));

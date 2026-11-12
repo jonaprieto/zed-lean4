@@ -1,5 +1,8 @@
 //! Runs the built proxy in front of a real `lake serve` on tests/fixtures/lean.
 //! Needs elan on PATH: `cargo test -p lean4-ide-proxy --test lean_e2e -- --ignored`.
+mod common;
+
+use common::screen;
 use futures_util::{SinkExt, StreamExt};
 use lean4_ide_proxy::codec;
 use serde_json::{Value, json};
@@ -261,22 +264,11 @@ async fn infoview_gets_interactive_goals() {
 async fn tui_shows_goal_from_real_lean() {
     use lean4_ide_proxy::tui::{
         app::{App, Effect},
-        socket_request,
+        lean, socket_request,
     };
     use ratatui::crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::{Terminal, backend::TestBackend};
-
-    fn screen(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-        terminal.draw(|f| app.render(f)).unwrap();
-        let buf = terminal.backend().buffer();
-        (0..20)
-            .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let mut lsp = Lsp::start().await;
@@ -302,7 +294,7 @@ async fn tui_shows_goal_from_real_lean() {
                 let Effect::Send(m) = effect else {
                     panic!("unexpected effect {effect:?}")
                 };
-                if m["call"] == "showDocument" {
+                if m["call"] == lean::SHOW_DOCUMENT {
                     let uri = m["args"][0]["uri"].as_str().unwrap();
                     assert!(uri.ends_with("Init/Prelude.lean"), "{uri}");
                     return;
@@ -354,17 +346,6 @@ async fn tui_shows_interactive_messages_from_real_lean() {
         socket_request,
     };
     use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use ratatui::{Terminal, backend::TestBackend};
-
-    fn screen(app: &App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-        terminal.draw(|f| app.render(f)).unwrap();
-        let buf = terminal.backend().buffer();
-        (0..20)
-            .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let mut lsp = Lsp::start().await;
