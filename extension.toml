@@ -19,3 +19,13 @@ rev = "916c44f4d89c970f66dd34a49e7ce848f4d29e72"
 kind = "process:exec"
 command = "*"
 args = ["**"]
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["leanprover", "elan", "**"]
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["jonaprieto", "zed-lean4", "**"]

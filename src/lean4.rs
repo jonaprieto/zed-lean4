@@ -3,11 +3,113 @@ mod resolve;
 use std::{env, fs, path::PathBuf};
 use zed_extension_api::{self as zed, Result, serde_json::Value, settings::LspSettings};
 
-struct Lean4Extension;
+struct Lean4Extension {
+    cached_proxy: Option<String>,
+}
+
+impl Lean4Extension {
+    /// Proxy binary to run, or None to run lake directly. Failures fall back to lake.
+    fn proxy(
+        &mut self,
+        id: &zed::LanguageServerId,
+        settings: Option<&Value>,
+        worktree: &zed::Worktree,
+    ) -> Option<String> {
+        if !resolve::proxy_enabled(settings) {
+            return None;
+        }
+        if let Some(path) = settings
+            .and_then(|s| s.get("proxy_path"))
+            .and_then(Value::as_str)
+        {
+            return Some(path.into());
+        }
+        if let Some(path) = worktree.which("lean4-ide-proxy") {
+            return Some(path);
+        }
+        if let Some(path) = &self.cached_proxy
+            && fs::metadata(path).is_ok_and(|m| m.is_file())
+        {
+            return Some(path.clone());
+        }
+        match download_proxy(id) {
+            Ok(path) => {
+                self.cached_proxy = Some(path.clone());
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("lean4-ide: proxy unavailable, running lake directly: {e}");
+                None
+            }
+        }
+    }
+
+    fn launch(
+        &mut self,
+        id: &zed::LanguageServerId,
+        settings: Option<&Value>,
+        worktree: &zed::Worktree,
+        lake: String,
+        lake_args: Vec<String>,
+    ) -> zed::Command {
+        let proxy = self.proxy(id, settings, worktree);
+        let (command, args) = resolve::server_command(lake, lake_args, proxy);
+        zed::Command {
+            command,
+            args,
+            env: vec![],
+        }
+    }
+}
+
+/// Proxy release matching this extension's version, from disk or GitHub.
+fn download_proxy(id: &zed::LanguageServerId) -> Result<String> {
+    let (os, arch) = zed::current_platform();
+    let windows = matches!(os, zed::Os::Windows);
+    let tag = concat!("v", env!("CARGO_PKG_VERSION"));
+    let dir = resolve::proxy_dir(tag);
+    let bin = resolve::proxy_bin(&dir, windows);
+    // Offline restarts reuse the earlier download and spend no GitHub API call.
+    if fs::metadata(&bin).is_ok_and(|m| m.is_file()) {
+        zed::make_file_executable(&bin)?;
+        return Ok(bin);
+    }
+    let asset_name = resolve::proxy_asset_name(os, arch)?;
+    let release = zed::github_release_by_tag_name(resolve::PROXY_REPO, tag)?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| format!("release {} has no {asset_name}", release.version))?;
+    zed::set_language_server_installation_status(
+        id,
+        &zed::LanguageServerInstallationStatus::Downloading,
+    );
+    let kind = if windows {
+        zed::DownloadedFileType::Zip
+    } else {
+        zed::DownloadedFileType::GzipTar
+    };
+    if let Err(e) = zed::download_file(&asset.download_url, &dir, kind)
+        .and_then(|()| zed::make_file_executable(&bin))
+    {
+        // Drop a partial download so the next start retries.
+        fs::remove_dir_all(&dir).ok();
+        return Err(e);
+    }
+    for entry in fs::read_dir(".").map_err(|e| e.to_string())?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("lean4-ide-proxy-") && name != dir {
+            fs::remove_dir_all(entry.path()).ok();
+        }
+    }
+    Ok(bin)
+}
 
 impl zed::Extension for Lean4Extension {
     fn new() -> Self {
-        Self
+        Self { cached_proxy: None }
     }
 
     fn language_server_command(
@@ -35,11 +137,13 @@ impl zed::Extension for Lean4Extension {
 
         // Check $PATH
         if let Some(path) = worktree.which("lake") {
-            return Ok(zed::Command {
-                command: path,
-                args: lake_args,
-                env: vec![],
-            });
+            return Ok(self.launch(
+                language_server_id,
+                settings.as_ref(),
+                worktree,
+                path,
+                lake_args,
+            ));
         }
 
         // Check $ELAN_HOME or default directory
@@ -63,11 +167,13 @@ impl zed::Extension for Lean4Extension {
         let lake_path_str = lake_path.to_string_lossy().to_string();
 
         if worktree.which(&lake_path_str).is_some() {
-            return Ok(zed::Command {
-                command: lake_path_str,
-                args: lake_args,
-                env: vec![],
-            });
+            return Ok(self.launch(
+                language_server_id,
+                settings.as_ref(),
+                worktree,
+                lake_path_str,
+                lake_args,
+            ));
         }
 
         // Check lsp.lean4-ide.settings
@@ -160,11 +266,13 @@ impl zed::Extension for Lean4Extension {
 
         fs::remove_dir_all(&version_dir).ok();
 
-        Ok(zed::Command {
-            command: lake_path_str,
-            args: lake_args,
-            env: vec![],
-        })
+        Ok(self.launch(
+            language_server_id,
+            settings.as_ref(),
+            worktree,
+            lake_path_str,
+            lake_args,
+        ))
     }
 
     fn language_server_initialization_options(

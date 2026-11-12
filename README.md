@@ -37,6 +37,10 @@ lean --version
 - If Lean 4 is not detected, this extension can automatically install elan with default toolchain. To enable this feature, you must set `"elan_auto_install"` to `true`. You can also specify the default toolchain by setting `"elan_default_toolchain"` to `"stable"`, `"nightly"` or `"v4.28.0"`.
 - During installation, the extension will automatically add `~/.elan` to your $PATH. The Lean toolchain can be completely removed by running `elan self uninstall`.
 
+### Proxy
+
+The extension runs `lake serve` behind `lean4-ide-proxy`. It looks for the proxy in `lsp.lean4-ide.settings.proxy_path`, then as `lean4-ide-proxy` on `$PATH`, then downloads the matching release from github.com/jonaprieto/zed-lean4. Any failure falls back to plain `lake serve`, and `"proxy": false` disables it. Until the first release exists, install it with `cargo install --path crates/proxy --locked`. `proxy_path` and `binary.path` run whatever they point at, so only set them in settings you trust.
+
 ## settings.json Sample
 
 ```json
@@ -57,6 +61,8 @@ lean --version
   }
 }
 ```
+
+Setting `binary` bypasses the proxy (and so the goal-in-hover feature); omit it to use the proxy.
 
 ## TODO list
 
