@@ -1,0 +1,1 @@
+{"id": "lean4-ide:1", "jsonrpc": "2.0", "result": {"goals": ["n : Nat\n⊢ n + 0 = n"], "rendered": "```lean\nn : Nat\n⊢ n + 0 = n\n```"}}

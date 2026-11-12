@@ -1,0 +1,1 @@
+{"id": 2, "jsonrpc": "2.0", "result": {"contents": {"kind": "markdown", "value": "This tactic applies to a goal whose target has the form `x ~ x`,\nwhere `~` is equality, heterogeneous equality or any relation that\nhas a reflexivity lemma tagged with the attribute @[refl].\n"}, "range": {"end": {"character": 5, "line": 1}, "start": {"character": 2, "line": 1}}}}

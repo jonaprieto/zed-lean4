@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod hover;
 pub mod msg;
 pub mod router;
 mod run;
