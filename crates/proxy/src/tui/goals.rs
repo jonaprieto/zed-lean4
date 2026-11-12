@@ -1,19 +1,14 @@
 //! Lean's interactive goals (`Lean.Widget.InteractiveGoal`, `TaggedText`) as styled terminal lines.
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 use serde_json::Value;
 
-use super::view::{Link, Text};
-
-const HYP: Style = Style::new().fg(Color::Cyan);
-const PREFIX: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
-const INACCESSIBLE: Style = Style::new().add_modifier(Modifier::DIM);
-const INSERTED: Style = Style::new().fg(Color::Black).bg(Color::Green);
-const REMOVED: Style = Style::new().fg(Color::Black).bg(Color::Red);
-const KEYWORD: Style = Style::new().fg(Color::Magenta);
-const LITERAL: Style = Style::new().fg(Color::Green);
+use super::{
+    theme,
+    view::{Link, Text},
+};
 
 const KEYWORDS: &[&str] = &[
     "fun", "λ", "let", "have", "show", "from", "by", "do", "match", "with", "if", "then", "else",
@@ -72,6 +67,7 @@ pub fn goal_text(goal: &Value) -> String {
 
 /// The goal's lines: case name, hypotheses and the target, colored like the infoview.
 pub fn goal_lines(goal: &Value) -> Vec<Text> {
+    let theme = theme::current();
     let mut out = Vec::new();
     let locals: Vec<&str> = goal["hyps"]
         .as_array()
@@ -81,8 +77,8 @@ pub fn goal_lines(goal: &Value) -> Vec<Text> {
         .collect();
     if let Some(case) = goal["userName"].as_str() {
         out.push(Text::from(Line::from(vec![
-            Span::styled("case ", INACCESSIBLE),
-            Span::styled(case.to_owned(), Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("case ", theme.inaccessible),
+            Span::styled(case.to_owned(), theme.case_name),
         ])));
     }
     for hyp in goal["hyps"].as_array().into_iter().flatten() {
@@ -93,9 +89,9 @@ pub fn goal_lines(goal: &Value) -> Vec<Text> {
                 head.push(Span::raw(" "));
             }
             let style = if name.contains('✝') {
-                INACCESSIBLE
+                theme.inaccessible
             } else {
-                HYP
+                theme.hypothesis
             };
             head.push(Span::styled(name.to_owned(), style.patch(mark)));
         }
@@ -108,7 +104,10 @@ pub fn goal_lines(goal: &Value) -> Vec<Text> {
         }
         out.extend(lines);
     }
-    let target = Line::from(Span::styled(prefix(goal), PREFIX.patch(marked(goal))));
+    let target = Line::from(Span::styled(
+        prefix(goal),
+        theme.goal_prefix.patch(marked(goal)),
+    ));
     out.extend(typeset(target.into(), &goal["type"], &locals));
     out
 }
@@ -130,9 +129,9 @@ fn prefix(goal: &Value) -> String {
 /// Background for a hypothesis or goal the tactic inserted or removed.
 fn marked(v: &Value) -> Style {
     if v["isInserted"] == true {
-        INSERTED
+        theme::current().inserted
     } else if v["isRemoved"] == true {
-        REMOVED
+        theme::current().removed
     } else {
         Style::new()
     }
@@ -185,6 +184,7 @@ pub fn code_line(s: &str) -> Line<'static> {
 /// Lean tokens of `s` as spans: keywords, number and string literals, and locals.
 // ponytail: a lexer, not a parser; bound variables (`fun x =>`) stay uncolored.
 fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {
+    let theme = theme::current();
     let chars: Vec<char> = s.chars().collect();
     let mut plain = String::new();
     let mut i = 0;
@@ -204,9 +204,9 @@ fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {
             }
             let word: String = chars[start..i].iter().collect();
             if KEYWORDS.contains(&word.as_str()) {
-                Some(KEYWORD)
+                Some(theme.keyword)
             } else if locals.contains(&word.as_str()) {
-                Some(HYP)
+                Some(theme.hypothesis)
             } else {
                 None
             }
@@ -218,17 +218,17 @@ fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {
             {
                 i += 1;
             }
-            Some(LITERAL)
+            Some(theme.literal)
         } else if c == '"' {
             i += 1;
             while i < chars.len() && chars[i] != '"' {
                 i += if chars[i] == '\\' { 2 } else { 1 };
             }
             i = (i + 1).min(chars.len());
-            Some(LITERAL)
+            Some(theme.literal)
         } else if c == '∀' || c == '∃' {
             i += if chars.get(i + 1) == Some(&'!') { 2 } else { 1 };
-            Some(KEYWORD)
+            Some(theme.keyword)
         } else {
             i += 1;
             None
@@ -262,8 +262,8 @@ fn runs<'v>(
         parts.iter().for_each(|p| runs(p, style, info, f));
     } else if let Some([tag, inner]) = t["tag"].as_array().map(Vec::as_slice) {
         let style = match tag["diffStatus"].as_str() {
-            Some("wasChanged" | "wasInserted" | "willInsert") => INSERTED,
-            Some("willChange" | "willDelete" | "wasDeleted") => REMOVED,
+            Some("wasChanged" | "wasInserted" | "willInsert") => theme::current().inserted,
+            Some("willChange" | "willDelete" | "wasDeleted") => theme::current().removed,
             _ => style,
         };
         let info = tag.get("info").or(info);
@@ -301,6 +301,7 @@ mod tests {
 
     #[test]
     fn goal_lines_keep_layout_and_mark_names_and_diffs() {
+        let t = theme::current();
         let texts = goal_lines(&goal());
         let lines: Vec<&Line> = texts.iter().map(|t| &t.line).collect();
         let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
@@ -314,11 +315,11 @@ mod tests {
                 "  0 = n"
             ]
         );
-        assert_eq!(lines[1].spans[0].style, HYP);
-        assert_eq!(lines[1].spans[2].style, INACCESSIBLE);
-        assert_eq!(lines[2].spans[0].style, HYP.patch(INSERTED));
-        assert_eq!(lines[3].spans[0].style, PREFIX);
-        assert_eq!(lines[3].spans[1].style, INSERTED);
+        assert_eq!(lines[1].spans[0].style, t.hypothesis);
+        assert_eq!(lines[1].spans[2].style, t.inaccessible);
+        assert_eq!(lines[2].spans[0].style, t.hypothesis.patch(t.inserted));
+        assert_eq!(lines[3].spans[0].style, t.goal_prefix);
+        assert_eq!(lines[3].spans[1].style, t.inserted);
         assert_eq!(lines[3].spans[2].style, Style::new());
         // `h : ` is 4 characters; `n = 0` is the tagged subterm after it.
         assert_eq!(
@@ -341,6 +342,7 @@ mod tests {
 
     #[test]
     fn highlight_colors_keywords_literals_and_locals() {
+        let t = theme::current();
         let mut spans = Vec::new();
         highlight(
             "∀ (k : Nat), fun x => n + 10 = Nat.succ k ∧ s = \"a\\\"b\" ∃! y",
@@ -354,19 +356,19 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("∀", KEYWORD),
+                ("∀", t.keyword),
                 (" (k : Nat), ", Style::new()),
-                ("fun", KEYWORD),
+                ("fun", t.keyword),
                 (" x => ", Style::new()),
-                ("n", HYP),
+                ("n", t.hypothesis),
                 (" + ", Style::new()),
-                ("10", LITERAL),
+                ("10", t.literal),
                 (" = Nat.succ k ∧ ", Style::new()),
-                ("s", HYP),
+                ("s", t.hypothesis),
                 (" = ", Style::new()),
-                ("\"a\\\"b\"", LITERAL),
+                ("\"a\\\"b\"", t.literal),
                 (" ", Style::new()),
-                ("∃!", KEYWORD),
+                ("∃!", t.keyword),
                 (" y", Style::new()),
             ]
         );

@@ -15,12 +15,14 @@ pub const INSERT_TEXT: &str = "insertText";
 // Events the proxy sends the infoview page.
 pub const CHANGED_CURSOR_LOCATION: &str = "changedCursorLocation";
 pub const GOT_SERVER_NOTIFICATION: &str = "gotServerNotification";
+pub const SENT_CLIENT_NOTIFICATION: &str = "sentClientNotification";
 
 // LSP methods.
 pub const PUBLISH_DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
 pub const RPC_CALL: &str = "$/lean/rpc/call";
 pub const RPC_RELEASE: &str = "$/lean/rpc/release";
 pub const HOVER: &str = "textDocument/hover";
+pub const DID_CHANGE_CONFIGURATION: &str = "workspace/didChangeConfiguration";
 
 // Lean's widget RPC methods.
 pub const GET_INTERACTIVE_GOALS: &str = "Lean.Widget.getInteractiveGoals";
@@ -41,12 +43,32 @@ pub const CONTENT_MODIFIED: i64 = -32801;
 /// LSP `RequestCancelled`.
 pub const REQUEST_CANCELLED: i64 = -32800;
 
-/// The name of an LSP diagnostic's severity; a missing one counts as an error.
-pub fn severity(diagnostic: &Value) -> &'static str {
-    match diagnostic["severity"].as_u64() {
-        Some(2) => "warning",
-        Some(3) => "information",
-        Some(4) => "hint",
-        _ => "error",
+/// An LSP diagnostic's severity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+impl Severity {
+    /// The severity of `diagnostic`; a missing one counts as an error.
+    pub fn of(diagnostic: &Value) -> Self {
+        match diagnostic["severity"].as_u64() {
+            Some(2) => Self::Warning,
+            Some(3) => Self::Information,
+            Some(4) => Self::Hint,
+            _ => Self::Error,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Information => "information",
+            Self::Hint => "hint",
+        }
     }
 }

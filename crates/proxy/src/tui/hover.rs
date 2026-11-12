@@ -1,11 +1,8 @@
 //! Lean's hover at the cursor (`textDocument/hover`) as terminal lines.
-use ratatui::{
-    style::Stylize,
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 use serde_json::Value;
 
-use super::{goals, view::HANG};
+use super::{goals, theme, view::HANG};
 
 /// Markdown lines that separate the signature from the docstring.
 const RULES: &[&str] = &["***", "---", "___"];
@@ -65,7 +62,8 @@ struct Prose {
 impl Prose {
     fn flush(&mut self) {
         if let Some((text, hang)) = self.paragraph.take() {
-            self.lines.push((Line::from(Span::raw(text)).dim(), hang));
+            self.lines
+                .push((Line::from(Span::styled(text, theme::current().docs)), hang));
         }
     }
 }

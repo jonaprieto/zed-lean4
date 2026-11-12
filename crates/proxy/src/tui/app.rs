@@ -15,6 +15,7 @@ use super::{
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
     settings,
+    theme::{self, Theme},
     view::{self, Text},
 };
 
@@ -208,6 +209,11 @@ impl App {
                 }
                 return vec![];
             }
+            Some(lean::SENT_CLIENT_NOTIFICATION)
+                if m["args"][0] == lean::DID_CHANGE_CONFIGURATION =>
+            {
+                return self.apply_settings(&m["args"][1]["settings"][settings::INFOVIEW]);
+            }
             Some(_) => return vec![],
             None => {}
         }
@@ -274,6 +280,7 @@ impl App {
             if settings::opens_browser(&result["infoview"]) {
                 return vec![Effect::OpenBrowser, Effect::Quit];
             }
+            self.apply_settings(&result["infoview"]);
             return self.cursor_moved(&result["location"]);
         }
         if clear_if_awaiting(&mut pending.subscribe, id) {
@@ -537,6 +544,22 @@ impl App {
             l["range"]["start"].clone()
         });
         self.rpc.request(session, position, method, params)
+    }
+
+    /// Takes up the `infoview` settings: draws with their theme from now on and
+    /// says what in them is wrong. Goals and the hover keep the colors they
+    /// were typeset with, so a new theme asks for them again.
+    fn apply_settings(&mut self, infoview: &Value) -> Vec<Effect> {
+        let (new, errors) = Theme::from_settings(infoview);
+        if !errors.is_empty() {
+            self.status = Some(errors.join("; "));
+        }
+        if new == theme::current() {
+            return vec![];
+        }
+        theme::set(new);
+        self.dirty();
+        self.show(self.location.clone())
     }
 
     fn cursor_moved(&mut self, location: &Value) -> Vec<Effect> {

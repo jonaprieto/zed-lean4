@@ -2,7 +2,7 @@
 use std::collections::HashSet;
 
 use ratatui::{
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 use serde_json::Value;
@@ -148,8 +148,6 @@ pub const HANG: usize = 4;
 
 /// Characters the `▾ `/`▸ ` fold marker adds before a header.
 pub const MARKER_WIDTH: usize = 2;
-
-pub const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 /// The character of `line` under column `col`, counting from character `start`.
 pub fn char_at(line: &Line, start: usize, col: usize) -> Option<usize> {

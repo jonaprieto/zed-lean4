@@ -102,7 +102,12 @@ and pick up changes without a restart:
   "lean4-ide": {
     "settings": {
       "infoview": {
-        "open": "terminal"
+        "open": "terminal",
+        "theme": {
+          "keyword": "light-magenta",
+          "inserted": {"fg": "black", "bg": "#87d787"},
+          "selection": {"bg": "236", "modifiers": []}
+        }
       }
     }
   }
@@ -112,6 +117,16 @@ and pick up changes without a restart:
 - `open`: what the gutter run button opens, `"terminal"` (the default) or
   `"browser"`. With `"browser"` the task opens the browser infoview and exits;
   the Open Lean Infoview code action always opens the browser.
+- `theme`: colors of the terminal infoview, role by role. By default it uses
+  the terminal's named colors, which Zed's terminal takes from your editor
+  theme, so most themes need nothing here. A role takes a color (a name such
+  as `red` or `light-blue`, `#rrggbb`, or a 256-color index such as `"236"`)
+  for its foreground, or an object with `fg`, `bg` and `modifiers` (`bold`,
+  `dim`, `italic`, `underlined`, `reversed`, `crossed_out`; a list replaces the
+  role's own). Roles: `hypothesis`, `goal_prefix`, `inaccessible`, `case_name`,
+  `inserted`, `removed`, `keyword`, `literal`, `trace_class`, `selection`,
+  `heading`, `docs`, `error`, `warning`, `information`, `hint`. Unknown roles
+  and colors show in the view's footer.
 
 ### Abbreviation
 

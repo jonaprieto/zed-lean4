@@ -4,7 +4,7 @@ use super::{
     draw::{KEYS, PICKED_KEYS},
     *,
 };
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, style::Color};
 
 const U: &str = "file:///p/F.lean";
 const ID_PREFIX: &str = "tui-1";
@@ -319,6 +319,28 @@ fn diagnostics_come_from_subscribe_and_notifications() {
     hides(&app, "2:2 warning: old");
     app.on_message(&json!({"event":"gotServerNotification","args":["$/lean/fileProgress",{"uri":U,"diagnostics":[]}]}));
     shows(&app, &["2:0 error: new"]);
+}
+
+#[test]
+fn a_new_theme_from_zed_redraws_and_bad_roles_show_in_the_footer() {
+    let mut app = app();
+    let configure = |theme: Value| {
+        json!({"event":lean::SENT_CLIENT_NOTIFICATION,"args":[lean::DID_CHANGE_CONFIGURATION,
+            {"settings":{"infoview":{"theme":theme}}}]})
+    };
+    let effects = app.on_message(&configure(json!({"keyword":"yellow","bogus":"red"})));
+    // Goals typeset in the old colors are asked for again.
+    assert_eq!(sent(effects), goal_requests(1, 2));
+    assert_eq!(
+        theme::current().keyword,
+        Theme::default().keyword.fg(Color::Yellow)
+    );
+    assert_eq!(footer(&app), "theme.bogus: no such role");
+    // The same theme again changes nothing.
+    assert!(
+        app.on_message(&configure(json!({"keyword":"yellow"})))
+            .is_empty()
+    );
 }
 
 #[test]

@@ -4,8 +4,7 @@ use std::rc::Rc;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
-    style::Stylize,
-    text::Line,
+    text::{Line, Span},
     widgets::Paragraph,
 };
 use serde_json::Value;
@@ -15,7 +14,8 @@ use crate::tui::{
     detail::{self, Picked},
     lean, messages,
     screen::{Screen, Wrapped},
-    view::{self, Row, Rows},
+    theme,
+    view::{Row, Rows},
 };
 
 pub(super) const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
@@ -30,6 +30,7 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(frame.area());
+        let theme = theme::current();
         let wrapped = self.wrapped(body.width);
         let selected = wrapped.lines_of(self.selected);
         let height = usize::from(body.height);
@@ -48,7 +49,7 @@ impl App {
         let mut lines = wrapped.lines[scroll..end].to_vec();
         for (n, line) in lines.iter_mut().enumerate() {
             if selected.contains(&(scroll + n)) {
-                line.style = line.style.patch(view::SELECTED);
+                line.style = line.style.patch(theme.selection);
             }
         }
         *self.screen.borrow_mut() = Screen {
@@ -95,7 +96,10 @@ impl App {
         if self.goals.is_some() {
             let goals = self.goal_list();
             rows.push(Line::raw(""));
-            rows.open("tactic".into(), Line::from("Tactic state".bold()));
+            rows.open(
+                "tactic".into(),
+                Line::styled("Tactic state", theme::current().heading),
+            );
             match goals.len() {
                 0 => rows.push(Line::raw("No goals")),
                 1 => rows.push(Line::raw("1 goal")),
@@ -128,14 +132,20 @@ impl App {
         }
         if self.term_goal.is_some() {
             rows.push(Line::raw(""));
-            rows.open("term".into(), Line::from("Expected type".bold()));
+            rows.open(
+                "term".into(),
+                Line::styled("Expected type", theme::current().heading),
+            );
             self.term_texts.iter().for_each(|l| rows.push(l.clone()));
             rows.close();
         }
         self.build_messages(rows, uri, cursor);
         if let Some(hover) = &self.hover {
             rows.push(Line::raw(""));
-            rows.open("hover".into(), Line::from("At the cursor".bold()));
+            rows.open(
+                "hover".into(),
+                Line::styled("At the cursor", theme::current().heading),
+            );
             hover
                 .iter()
                 .for_each(|(l, hang)| rows.push_hanging(l.clone(), *hang));
@@ -169,39 +179,49 @@ impl App {
         rows.push(Line::raw(""));
         rows.open(
             "messages".into(),
-            Line::from(format!("{title} ({count})").bold()),
+            Line::styled(format!("{title} ({count})"), theme::current().heading),
         );
         if let Some(list) = interactive {
             for (i, d) in list.iter().enumerate() {
-                let at = &d["range"]["start"];
-                let (line, character) = (
-                    at["line"].as_u64().unwrap_or_default() + 1,
-                    &at["character"],
-                );
-                let head = Line::raw(format!("{line}:{character} {}: ", lean::severity(d)));
-                let key = format!("message:{uri}:{line}:{character}:{i}");
+                let (position, head) = message_head(d);
+                let key = format!("message:{uri}:{position}:{i}");
                 messages::message(rows, &self.trace_children, &key, head, &d["message"]);
             }
             return rows.close();
         }
         for d in messages {
-            let at = &d["range"]["start"];
             let mut text = d["message"].as_str().unwrap_or_default().lines().peekable();
-            let first = format!(
-                "{}:{} {}: {}",
-                at["line"].as_u64().unwrap_or_default() + 1,
-                at["character"],
-                lean::severity(d),
-                text.next().unwrap_or_default()
-            );
+            let (position, mut first) = message_head(d);
+            let summary = text.next().unwrap_or_default();
+            first.spans.push(Span::raw(summary.to_owned()));
             if text.peek().is_none() {
-                rows.push(Line::raw(first));
+                rows.push(first);
                 continue;
             }
-            rows.open(format!("message:{uri}:{first}"), Line::raw(first));
+            let severity = lean::Severity::of(d).name();
+            let key = format!("message:{uri}:{position} {severity}: {summary}");
+            rows.open(key, first);
             text.for_each(|l| rows.push(Line::raw(format!("  {l}"))));
             rows.close();
         }
         rows.close();
     }
+}
+
+/// A diagnostic's `line:character`, and the head of its row: that position
+/// and its severity, colored by the theme.
+fn message_head(d: &Value) -> (String, Line<'static>) {
+    let at = &d["range"]["start"];
+    let position = format!(
+        "{}:{}",
+        at["line"].as_u64().unwrap_or_default() + 1,
+        at["character"]
+    );
+    let severity = lean::Severity::of(d);
+    let head = Line::from(vec![
+        Span::raw(format!("{position} ")),
+        Span::styled(severity.name(), theme::current().severity(severity)),
+        Span::raw(": "),
+    ]);
+    (position, head)
 }

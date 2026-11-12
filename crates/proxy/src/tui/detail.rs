@@ -2,7 +2,6 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Stylize,
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
@@ -11,6 +10,7 @@ use serde_json::Value;
 use super::{
     goals,
     rpc::{Held, Session},
+    theme,
     view::Text,
 };
 
@@ -57,7 +57,8 @@ impl Picked {
             None => vec![head],
         };
         if let Some(doc) = popup.and_then(|p| p["doc"].as_str()) {
-            lines.extend(doc.lines().map(|l| Line::raw(l.to_owned()).dim()));
+            let docs = theme::current().docs;
+            lines.extend(doc.lines().map(|l| Line::styled(l.to_owned(), docs)));
         }
         lines
     }

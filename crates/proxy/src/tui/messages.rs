@@ -1,18 +1,13 @@
 //! Lean's interactive messages (`TaggedText<MsgEmbed>`) as foldable rows.
 use std::collections::HashMap;
 
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
-};
+use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::{
-    goals,
+    goals, theme,
     view::{Rows, Text},
 };
-
-const TRACE_CLASS: Style = Style::new().fg(Color::Blue);
 
 /// Writes one diagnostic: `head`, then its message. A message longer than a
 /// line folds under its first line, keyed by `key`. `lazy` holds the trace
@@ -115,7 +110,7 @@ impl Writer<'_, '_> {
         let class = trace["cls"].as_str().unwrap_or_default();
         self.line.line.spans.extend([
             Span::raw(" ".repeat(usize::try_from(indent).unwrap_or(0))),
-            Span::styled(format!("[{class}]"), TRACE_CLASS),
+            Span::styled(format!("[{class}]"), theme::current().trace_class),
             Span::raw(" "),
         ]);
         self.embed(&trace["msg"], key, &mut 0);
