@@ -38,6 +38,8 @@ where
         };
         for action in router.handle(event) {
             match action {
+                // Browser transport is not wired yet.
+                Action::ToBrowser(_) => {}
                 Action::ToClient(m) => codec::write(&mut client_out, &m).await?,
                 Action::ToServer(m) => codec::write(&mut server_out, &m).await?,
             }

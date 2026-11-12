@@ -1,16 +1,20 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
-use crate::{hover, init, msg};
+use crate::{bridge, hover, init, msg};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum Event {
+    FromBrowser(u64, Value),
     FromClient(Value),
     FromServer(Value),
 }
 
 #[derive(Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum Action {
+    ToBrowser(Value),
     ToClient(Value),
     ToServer(Value),
 }
@@ -25,6 +29,7 @@ pub struct Router {
 }
 
 enum Pending {
+    Page { id: String },
     Goal(String),
 }
 
@@ -37,6 +42,7 @@ struct HoverJoin {
 impl Router {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
+            Event::FromBrowser(connection, m) => self.on_browser(connection, m),
             Event::FromClient(m) => self.on_client(init::rewrite_request(m)),
             Event::FromServer(m) => self.on_server(m),
         }
@@ -84,13 +90,16 @@ impl Router {
             return vec![Action::ToClient(m)];
         }
         if let Some(own) = msg::proxy_response_id(&m) {
-            let Some(Pending::Goal(key)) = self.pending.remove(own) else {
-                return vec![];
+            return match self.pending.remove(own) {
+                Some(Pending::Goal(key)) => {
+                    if let Some(join) = self.hovers.get_mut(&key) {
+                        join.goal = Some(hover::rendered_goal(&m));
+                    }
+                    self.finish_hover(&key)
+                }
+                Some(Pending::Page { id }) => vec![Action::ToBrowser(bridge::relay(&id, &m))],
+                None => vec![],
             };
-            if let Some(join) = self.hovers.get_mut(&key) {
-                join.goal = Some(hover::rendered_goal(&m));
-            }
-            return self.finish_hover(&key);
         }
         let key = msg::id_key(&m["id"]);
         match self.hovers.get_mut(&key) {
@@ -105,6 +114,52 @@ impl Router {
                 self.finish_hover(&key)
             }
             None => vec![Action::ToClient(m)],
+        }
+    }
+
+    fn on_browser(&mut self, _connection: u64, m: Value) -> Vec<Action> {
+        let Some(call) = bridge::Call::parse(&m) else {
+            return m["id"]
+                .as_str()
+                .map(|id| {
+                    vec![Action::ToBrowser(bridge::reply_error(
+                        id,
+                        -32600,
+                        "invalid page call",
+                    ))]
+                })
+                .unwrap_or_default();
+        };
+        match (call.name.as_str(), call.args.as_slice()) {
+            ("sendClientRequest", [uri, method, params])
+                if uri.is_string()
+                    && method.is_string()
+                    && method.as_str().is_some_and(|m| m.starts_with("$/lean/")) =>
+            {
+                let id = self.proxy_id();
+                self.pending
+                    .insert(id.clone(), Pending::Page { id: call.id });
+                vec![Action::ToServer(msg::request(
+                    &id,
+                    method.as_str().unwrap(),
+                    params.clone(),
+                ))]
+            }
+            ("sendClientNotification", [uri, method, params])
+                if uri.is_string()
+                    && method.is_string()
+                    && method.as_str().is_some_and(|m| m.starts_with("$/lean/")) =>
+            {
+                vec![
+                    Action::ToServer(msg::notification(method.as_str().unwrap(), params.clone())),
+                    Action::ToBrowser(bridge::reply(&call.id, Value::Null)),
+                ]
+            }
+            _ => vec![Action::ToBrowser(bridge::reply_error(
+                &call.id,
+                -32601,
+                "unsupported or malformed page call",
+            ))],
         }
     }
 
@@ -381,5 +436,66 @@ mod reverse_tests {
                 vec![Action::ToServer(m)]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+
+    #[test]
+    fn routes_two_tabs_out_of_order_and_preserves_errors() {
+        let mut r = Router::default();
+        for (id, proxy) in [("a:1", "lean4-ide:1"), ("b:1", "lean4-ide:2")] {
+            assert_eq!(
+                r.handle(Event::FromBrowser(
+                    1,
+                    json!({"id":id,"call":"sendClientRequest",
+                "args":["file:///F.lean","$/lean/rpc/call",{"x":1}]})
+                )),
+                vec![Action::ToServer(msg::request(
+                    proxy,
+                    "$/lean/rpc/call",
+                    json!({"x":1})
+                ))]
+            );
+        }
+        let error = json!({"code":-32900,"message":"reconnect","data":{"x":2}});
+        assert_eq!(
+            r.handle(Event::FromServer(json!({"id":"lean4-ide:2","error":error}))),
+            vec![Action::ToBrowser(json!({"id":"b:1","error":error}))]
+        );
+        assert_eq!(
+            r.handle(Event::FromServer(json!({"id":"lean4-ide:1","result":null}))),
+            vec![Action::ToBrowser(json!({"id":"a:1","result":null}))]
+        );
+        assert!(r.pending.is_empty());
+    }
+
+    #[test]
+    fn notifications_acknowledge_and_bad_calls_fail_locally() {
+        let mut r = Router::default();
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:2","call":"sendClientNotification",
+            "args":["file:///F.lean","$/lean/rpc/release",{}]})
+            )),
+            vec![
+                Action::ToServer(msg::notification("$/lean/rpc/release", json!({}))),
+                Action::ToBrowser(json!({"id":"a:2","result":null}))
+            ]
+        );
+        for m in [
+            json!({"id":"a:3","call":"sendClientRequest","args":[]}),
+            json!({"id":"a:4","call":"runTestScript","args":["bad"]}),
+            json!({"id":"a:5","call":7,"args":[]}),
+            json!({"id":"a:6","call":"sendClientNotification","args":["file:///F.lean","exit",null]}),
+            json!({"id":"a:7","call":"sendClientRequest","args":["file:///F.lean","shutdown",null]}),
+        ] {
+            let out = r.handle(Event::FromBrowser(1, m));
+            assert!(matches!(out.as_slice(), [Action::ToBrowser(v)] if v.get("error").is_some()));
+        }
+        assert!(r.handle(Event::FromBrowser(1, json!([]))).is_empty());
     }
 }

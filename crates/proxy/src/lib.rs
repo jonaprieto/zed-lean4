@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod codec;
 pub mod hover;
 pub mod init;
