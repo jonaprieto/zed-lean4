@@ -1,25 +1,7 @@
+mod resolve;
+
 use std::{env, fs, path::PathBuf};
 use zed_extension_api::{self as zed, Result, serde_json::Value, settings::LspSettings};
-
-fn lake_server_args(settings: Option<&Value>, worktree: &zed::Worktree) -> Vec<String> {
-    let mut args = Vec::new();
-
-    if let Some(project_dir) = settings
-        .and_then(|settings| settings.get("lean_project_dir"))
-        .and_then(Value::as_str)
-    {
-        let project_dir = PathBuf::from(project_dir);
-        let project_dir = if project_dir.is_absolute() {
-            project_dir
-        } else {
-            PathBuf::from(worktree.root_path()).join(project_dir)
-        };
-        args.extend(["--dir".into(), project_dir.to_string_lossy().into_owned()]);
-    }
-
-    args.extend(["serve".into(), "--".into()]);
-    args
-}
 
 struct Lean4Extension;
 
@@ -49,7 +31,7 @@ impl zed::Extension for Lean4Extension {
             });
         }
 
-        let lake_args = lake_server_args(settings.as_ref(), worktree);
+        let lake_args = resolve::lake_server_args(settings.as_ref(), &worktree.root_path());
 
         // Check $PATH
         if let Some(path) = worktree.which("lake") {
