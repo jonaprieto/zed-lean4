@@ -46,6 +46,31 @@ For development, build with `cargo build -p lean4-ide-proxy`, set
 language server. Setting `lsp.lean4-ide.settings.proxy: false` or an explicit
 `lsp.lean4-ide.binary` bypasses the proxy.
 
+### Terminal infoview
+
+Click the run button in the gutter next to any `theorem`, `lemma` or
+`example` (or run the task "Lean: terminal infoview" from `task: spawn`) to get
+the goals, the expected type and the messages at the cursor in Zed's terminal.
+The editor keeps focus, and the view follows the cursor from then on; you only
+open it once per session. It needs `lean4-ide-proxy` on your `PATH`. To put it
+beside the code instead of at the bottom, set `"terminal": {"dock": "right"}` in
+your Zed settings.
+
+The terminal infoview is a second client of the same socket the browser page
+uses. It finds the running proxy through a discovery file in
+`$XDG_RUNTIME_DIR/lean4-ide`, or `~/.cache/lean4-ide/run` when that is unset
+(`%LOCALAPPDATA%\lean4-ide\run` on Windows), and picks the server whose
+project root contains the directory you ran it from. The file holds the page
+URL with its token, so treat it like the URL itself. Goals refresh when the
+cursor moves and when Lean publishes new diagnostics for the file. After a
+proxy restart it reconnects on its own, once a second.
+
+Keys: `q`, `Esc` or `Ctrl-C` quit, `p` pins the current goals, `a` shows all
+messages, `c` copies the goals into a comment in the buffer, `j`/`k` or the
+arrow keys scroll, and `g`/`G` jump to the top or bottom. Lean widgets render
+HTML, which a terminal cannot show; press `o` to open the browser infoview for
+those.
+
 ### Abbreviation
 
 - Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
@@ -100,6 +125,7 @@ window. Items marked (proxy) depend on it.
 
 - [x] Goal state at the cursor in hover, via `$/lean/plainGoal`
 - [x] Browser infoview following the editor cursor
+- [x] Terminal infoview (goals, expected type, messages) in Zed's terminal
 - [ ] Tactic goals with hypotheses, case names and goal diffs
 - [ ] Expected type (term goal)
 - [ ] Messages at the cursor and an All Messages view

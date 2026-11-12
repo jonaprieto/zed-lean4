@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Lean: terminal infoview",
+    "command": "lean4-ide-proxy",
+    "args": ["tui"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true,
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "show_summary": false,
+    "show_command": false,
+    "tags": ["lean-infoview"]
+  }
+]

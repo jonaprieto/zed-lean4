@@ -247,3 +247,69 @@ async fn infoview_gets_interactive_goals() {
     .await
     .expect("infoview e2e timed out");
 }
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn tui_shows_goal_from_real_lean() {
+    use lean4_ide_proxy::tui::{
+        app::{App, Effect},
+        socket_request,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn screen(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..20)
+            .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut lsp = Lsp::start().await;
+        let opened = lsp
+            .request(
+                "workspace/executeCommand",
+                json!({"command": "lean4-ide.openInfoview"}),
+            )
+            .await;
+        assert!(opened.get("error").is_none(), "{opened}");
+        let url = lsp.show_url.clone().expect("window/showDocument URL");
+        let (mut socket, _) = connect_async(socket_request(&url).unwrap()).await.unwrap();
+        let pid = std::process::id();
+        let mut app = App::new(format!("tui-{pid}"));
+        let hello_id = format!("tui-{pid}:1");
+        let mut effects = app.connected(url);
+        let mut moved = false;
+        loop {
+            for effect in effects.drain(..) {
+                let Effect::Send(m) = effect else {
+                    panic!("unexpected effect {effect:?}")
+                };
+                socket.send(Message::text(m.to_string())).await.unwrap();
+            }
+            let text = screen(&app);
+            if text.contains("⊢ n + 0 = n") {
+                break;
+            }
+            let msg = socket.next().await.unwrap().unwrap();
+            let m: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            effects = app.on_message(&m);
+            if m["id"] == hello_id.as_str() && !moved {
+                moved = true;
+                lsp.request(
+                    "textDocument/documentHighlight",
+                    json!({
+                        "textDocument": {"uri": fixture_uri()},
+                        "position": {"line": 1, "character": 2}
+                    }),
+                )
+                .await;
+            }
+        }
+    })
+    .await
+    .expect("tui e2e timed out");
+}
