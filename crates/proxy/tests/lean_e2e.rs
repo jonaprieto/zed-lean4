@@ -105,3 +105,18 @@ async fn plain_goal_passes_through() {
     let resp = lsp.request("$/lean/plainGoal", pos).await;
     assert_eq!(resp["result"]["goals"], json!(["n : Nat\n⊢ n + 0 = n"]));
 }
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn hover_shows_goal_on_tactic() {
+    let mut lsp = Lsp::start().await;
+    let pos =
+        json!({"textDocument": {"uri": fixture_uri()}, "position": {"line": 1, "character": 2}});
+    let resp = lsp.request("textDocument/hover", pos).await;
+    let value = resp["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.starts_with("This tactic applies"), "{value}");
+    assert!(
+        value.ends_with("```lean\nn : Nat\n⊢ n + 0 = n\n```"),
+        "{value}"
+    );
+}
