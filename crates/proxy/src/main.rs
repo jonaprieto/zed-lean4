@@ -41,14 +41,19 @@ async fn serve() -> Result<i32> {
             None
         }
     };
-    lean4_ide_proxy::run(
+    let discovery = bridge.as_ref().and_then(|b| publish_discovery(&b.page_url));
+    let result = lean4_ide_proxy::run(
         tokio::io::stdin(),
         tokio::io::stdout(),
         server_in,
         server_out,
         bridge,
     )
-    .await?;
+    .await;
+    if let Some(path) = discovery {
+        let _ = std::fs::remove_file(path);
+    }
+    result?;
     // Dropping our end of the server's stdin (inside run) makes `lake serve` exit.
     let status = child.wait().await?;
     let code = status
@@ -56,4 +61,21 @@ async fn serve() -> Result<i32> {
         .and_then(|c| u8::try_from(c).ok())
         .unwrap_or(1);
     Ok(code.into())
+}
+
+fn publish_discovery(page_url: &str) -> Option<std::path::PathBuf> {
+    let dir = lean4_ide_proxy::discover::dir()?;
+    let published = std::env::current_dir()
+        .and_then(|d| d.canonicalize())
+        .and_then(|root| lean4_ide_proxy::discover::publish(&dir, &root, page_url));
+    match published {
+        Ok(path) => {
+            tracing::info!("infoview discovery file {path:?}");
+            Some(path)
+        }
+        Err(e) => {
+            tracing::warn!("infoview discovery unavailable: {e}");
+            None
+        }
+    }
 }

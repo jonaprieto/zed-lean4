@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod codec;
 pub mod cursor;
+pub mod discover;
 pub mod hover;
 pub mod init;
 pub mod msg;
