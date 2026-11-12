@@ -46,6 +46,9 @@ pub struct Router {
 }
 
 enum Pending {
+    Client {
+        id: String,
+    },
     Page {
         id: String,
     },
@@ -139,7 +142,12 @@ impl Router {
     }
 
     fn client_message(&mut self, m: Value) -> Vec<Action> {
-        if msg::proxy_response_id(&m).is_some() {
+        if let Some(own) = msg::proxy_response_id(&m) {
+            if matches!(self.pending.get(own), Some(Pending::Client { .. }))
+                && let Some(Pending::Client { id }) = self.pending.remove(own)
+            {
+                return vec![Action::ToBrowser(bridge::relay(&id, &m))];
+            }
             return vec![];
         }
         if msg::is_request(&m) && msg::method(&m) == Some("textDocument/hover") {
@@ -195,6 +203,9 @@ impl Router {
             return vec![Action::ToClient(m)];
         }
         if let Some(own) = msg::proxy_response_id(&m) {
+            if matches!(self.pending.get(own), Some(Pending::Client { .. })) {
+                return vec![];
+            }
             return match self.pending.remove(own) {
                 Some(Pending::Goal(key)) => {
                     if let Some(join) = self.hovers.get_mut(&key) {
@@ -229,7 +240,7 @@ impl Router {
                     );
                     vec![Action::ToBrowser(bridge::reply(&id, sid.clone()))]
                 }
-                None => vec![],
+                Some(Pending::Client { .. }) | None => vec![],
             };
         }
         let key = msg::id_key(&m["id"]);
@@ -262,6 +273,36 @@ impl Router {
                 .unwrap_or_default();
         };
         match (call.name.as_str(), call.args.as_slice()) {
+            ("insertText", [text, kind, pos]) if text.is_string() && kind.is_string() => {
+                let edit = cursor::insert_edit(
+                    text.as_str().unwrap(),
+                    kind.as_str().unwrap(),
+                    (!pos.is_null()).then_some(pos),
+                    self.location.as_ref(),
+                );
+                match edit {
+                    Some(edit) => {
+                        self.request_client(call.id, "workspace/applyEdit", json!({"edit":edit}))
+                    }
+                    None => vec![Action::ToBrowser(bridge::reply_error(
+                        &call.id,
+                        -32602,
+                        "no valid insertion position",
+                    ))],
+                }
+            }
+            ("applyEdit", [edit]) if edit.is_object() => {
+                self.request_client(call.id, "workspace/applyEdit", json!({"edit":edit}))
+            }
+            ("showDocument", [params]) if params["uri"].is_string() => {
+                let mut params = params.clone();
+                params["external"] = json!(false);
+                self.request_client(call.id, "window/showDocument", params)
+            }
+            ("restartFile", [uri]) if uri.is_string() => {
+                tracing::info!("restartFile is not implemented yet");
+                vec![Action::ToBrowser(bridge::reply(&call.id, Value::Null))]
+            }
             ("createRpcSession", [uri]) if uri.is_string() => {
                 let id = self.proxy_id();
                 self.pending.insert(
@@ -325,6 +366,13 @@ impl Router {
                 "unsupported or malformed page call",
             ))],
         }
+    }
+
+    fn request_client(&mut self, page_id: String, method: &str, params: Value) -> Vec<Action> {
+        let id = self.proxy_id();
+        self.pending
+            .insert(id.clone(), Pending::Client { id: page_id });
+        vec![Action::ToClient(msg::request(&id, method, params))]
     }
 
     fn tick(&self) -> Vec<Action> {
@@ -869,5 +917,61 @@ mod session_tests {
         assert_eq!(r.sessions.len(), 1);
         assert!(r.handle(Event::PageClosed(2)).is_empty());
         assert!(r.handle(Event::Tick).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    #[test]
+    fn zed_answers_go_to_pages_and_never_to_lean() {
+        let mut r = Router::default();
+        let edit = json!({"changes":{}});
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:1","call":"applyEdit","args":[edit]})
+            )),
+            vec![Action::ToClient(msg::request(
+                "lean4-ide:1",
+                "workspace/applyEdit",
+                json!({"edit":edit})
+            ))]
+        );
+        let response =
+            json!({"id":"lean4-ide:1","result":{"applied":false,"failureReason":"read only"}});
+        assert_eq!(
+            r.handle(Event::FromClient(response)),
+            vec![Action::ToBrowser(bridge::reply(
+                "a:1",
+                json!({"applied":false,"failureReason":"read only"})
+            ))]
+        );
+        let show = json!({"uri":"file:///F.lean","external":true,"selection":{"start":{"line":1,"character":2},"end":{"line":1,"character":3}}});
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:2","call":"showDocument","args":[show]})
+            )),
+            vec![Action::ToClient(msg::request(
+                "lean4-ide:2",
+                "window/showDocument",
+                json!({"uri":"file:///F.lean","selection":show["selection"],"external":false})
+            ))]
+        );
+        let error = json!({"code":-1,"message":"denied"});
+        assert_eq!(
+            r.handle(Event::FromClient(json!({"id":"lean4-ide:2","error":error}))),
+            vec![Action::ToBrowser(json!({"id":"a:2","error":error}))]
+        );
+        assert!(r.pending.is_empty());
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:3","call":"restartFile","args":["file:///F.lean"]})
+            )),
+            vec![Action::ToBrowser(bridge::reply("a:3", Value::Null))]
+        );
     }
 }

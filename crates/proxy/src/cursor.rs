@@ -27,6 +27,36 @@ pub fn location(m: &Value) -> Option<Value> {
     Some(json!({"uri":uri,"range":range}))
 }
 
+pub fn insert_edit(
+    text: &str,
+    kind: &str,
+    pos: Option<&Value>,
+    location: Option<&Value>,
+) -> Option<Value> {
+    let (uri, mut at) = match pos {
+        Some(pos) => (
+            pos["textDocument"]["uri"].as_str()?,
+            pos["position"].clone(),
+        ),
+        None => {
+            let loc = location?;
+            (loc["uri"].as_str()?, loc["range"]["start"].clone())
+        }
+    };
+    if !position(&at) {
+        return None;
+    }
+    let text = match kind {
+        "here" => text.to_owned(),
+        "above" => {
+            at["character"] = json!(0);
+            format!("{text}\n")
+        }
+        _ => return None,
+    };
+    Some(json!({"changes":{uri:[{"range":{"start":at,"end":at},"newText":text}]}}))
+}
+
 #[cfg(test)]
 mod cursor_tests {
     use super::*;
@@ -41,5 +71,28 @@ mod cursor_tests {
         m["method"] = json!("textDocument/hover");
         assert!(location(&m).is_none());
         assert!(!position(&json!({"line":-1,"character":0})));
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::*;
+
+    #[test]
+    fn inserts_above_line_zero_or_here_without_replacing_text() {
+        let pos =
+            json!({"textDocument":{"uri":"file:///F.lean"},"position":{"line":0,"character":4}});
+        let edit = insert_edit("/- goal -/", "above", Some(&pos), None).unwrap();
+        assert_eq!(
+            edit["changes"]["file:///F.lean"][0],
+            json!({"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"newText":"/- goal -/\n"})
+        );
+        let edit = insert_edit("exact h", "here", Some(&pos), None).unwrap();
+        assert_eq!(
+            edit["changes"]["file:///F.lean"][0]["range"]["start"],
+            pos["position"]
+        );
+        assert!(insert_edit("x", "here", None, None).is_none());
+        assert!(insert_edit("x", "bad", Some(&pos), None).is_none());
     }
 }
