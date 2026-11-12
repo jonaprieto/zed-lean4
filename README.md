@@ -72,7 +72,9 @@ proxy restart it reconnects on its own, once a second.
 
 Keys: `q`, `Esc` or `Ctrl-C` quit, `p` pins the current goals, `a` shows all
 messages, `c` copies the goals into a comment in the buffer, `j`/`k` or the
-arrow keys scroll, and `g`/`G` jump to the top or bottom. Lean widgets render
+arrow keys move the selection, `g`/`G` jump to the top or bottom, and `Enter`,
+space or `Tab` fold the section, goal or message around the selection. Long
+lines wrap with a hanging indent. Lean widgets render
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
 

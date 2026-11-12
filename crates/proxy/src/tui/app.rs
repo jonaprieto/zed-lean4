@@ -1,4 +1,7 @@
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 
 use ratatui::{
     Frame,
@@ -6,16 +9,19 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::Stylize,
     text::Line,
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 use serde_json::{Value, json};
 
-use super::goals;
+use super::{
+    goals,
+    view::{self, Rows},
+};
 
 const DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
 /// Lean's `RpcNeedsReconnect`: the file's worker restarted and dropped the session.
 const NEEDS_RECONNECT: i64 = -32900;
-const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k scroll";
+const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
 
 #[derive(Debug, PartialEq)]
 pub enum Effect {
@@ -52,9 +58,11 @@ pub struct App {
     asked: Option<(String, Value)>,
     diagnostics: HashMap<String, Vec<Value>>,
     all: bool,
-    scroll: u16,
-    /// Body height of the last render, for `G`.
-    height: Cell<u16>,
+    /// The selected row, which `enter` folds or unfolds.
+    selected: usize,
+    folded: HashSet<String>,
+    /// First visible screen line; render keeps the selection in view.
+    scroll: Cell<usize>,
     status: Option<String>,
     hello: Option<String>,
     subscribe: Option<String>,
@@ -98,8 +106,9 @@ impl App {
             asked: None,
             diagnostics: HashMap::new(),
             all: false,
-            scroll: 0,
-            height: Cell::new(0),
+            selected: 0,
+            folded: HashSet::new(),
+            scroll: Cell::new(0),
             status: None,
             hello: None,
             subscribe: None,
@@ -241,12 +250,14 @@ impl App {
             KeyCode::Char('c') => return self.copy(),
             KeyCode::Char('o') if self.page_url.is_some() => return vec![Effect::OpenBrowser],
             KeyCode::Char('o') => self.status = Some("Not connected".into()),
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.scroll = (self.scroll + 1).min(self.max_scroll())
+            KeyCode::Char('j') | KeyCode::Down => self.select(self.selected + 1),
+            KeyCode::Char('k') | KeyCode::Up => {
+                let last = self.rows().len().saturating_sub(1);
+                self.select(self.selected.min(last).saturating_sub(1))
             }
-            KeyCode::Char('k') | KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-            KeyCode::Char('g') => self.scroll = 0,
-            KeyCode::Char('G') => self.scroll = self.max_scroll(),
+            KeyCode::Char('g') => self.select(0),
+            KeyCode::Char('G') => self.select(usize::MAX),
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Tab => self.toggle_fold(),
             _ => {}
         }
         vec![]
@@ -263,11 +274,26 @@ impl App {
     pub fn render(&self, frame: &mut Frame) {
         let [body, footer] =
             Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
-        self.height.set(body.height);
-        let scroll = self.scroll.min(self.max_scroll());
-        let paragraph = Paragraph::new(self.lines())
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0));
+        let rows = self.rows();
+        let selected = self.selected.min(rows.len().saturating_sub(1));
+        let (mut lines, mut top, mut bottom) = (Vec::new(), 0, 0);
+        for (i, row) in rows.into_iter().enumerate() {
+            let mut wrapped = view::wrap(row.line, body.width.into());
+            if i == selected {
+                top = lines.len();
+                bottom = top + wrapped.len();
+                for line in &mut wrapped {
+                    line.style = line.style.patch(view::SELECTED);
+                }
+            }
+            lines.extend(wrapped);
+        }
+        let height = usize::from(body.height);
+        let mut scroll = self.scroll.get().min(lines.len().saturating_sub(height));
+        scroll = scroll.max(bottom.saturating_sub(height)).min(top);
+        self.scroll.set(scroll);
+        let paragraph =
+            Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
         frame.render_widget(paragraph, body);
         frame.render_widget(Line::raw(self.status.as_deref().unwrap_or(KEYS)), footer);
     }
@@ -388,43 +414,88 @@ impl App {
         vec![insert]
     }
 
-    fn max_scroll(&self) -> u16 {
-        let lines = u16::try_from(self.lines().len()).unwrap_or(u16::MAX);
-        lines.saturating_sub(self.height.get())
+    fn select(&mut self, row: usize) {
+        self.selected = row.min(self.rows().len().saturating_sub(1));
     }
 
-    fn lines(&self) -> Vec<Line<'_>> {
+    /// Folds or unfolds the innermost block around the selected row.
+    fn toggle_fold(&mut self) {
+        let rows = self.rows();
+        // New goals or messages may have left fewer rows than the selection.
+        self.selected = self.selected.min(rows.len().saturating_sub(1));
+        let Some(key) = rows.get(self.selected).and_then(|r| r.fold.clone()) else {
+            return;
+        };
+        if !self.folded.remove(&key) {
+            self.folded.insert(key.clone());
+        }
+        self.selected = rows
+            .iter()
+            .position(|r| r.header && r.fold.as_ref() == Some(&key))
+            .unwrap_or(self.selected);
+    }
+
+    fn rows(&self) -> Vec<view::Row> {
+        let mut rows = Rows::new(&self.folded);
+        self.build(&mut rows);
+        rows.rows
+    }
+
+    fn build(&self, rows: &mut Rows) {
         let Some(location) = &self.location else {
-            return vec![Line::raw("No Lean file at the cursor")];
+            return rows.push(Line::raw("No Lean file at the cursor"));
         };
         let uri = location["uri"].as_str().unwrap_or_default();
         let start = &location["range"]["start"];
         let cursor = start["line"].as_u64().unwrap_or_default();
         let pinned = if self.pinned { " [pinned]" } else { "" };
-        let mut lines = vec![Line::raw(format!(
+        rows.push(Line::raw(format!(
             "{}:{}:{}{pinned}",
             uri.rsplit('/').next().unwrap_or(uri),
             cursor + 1,
             start["character"]
-        ))];
+        )));
         if self.goals.is_some() {
             let goals = self.goal_list();
-            lines.extend([Line::raw(""), Line::from("Tactic state".bold())]);
+            rows.push(Line::raw(""));
+            rows.open("tactic".into(), Line::from("Tactic state".bold()));
             match goals.len() {
-                0 => lines.push(Line::raw("No goals")),
-                1 => lines.push(Line::raw("1 goal")),
-                n => lines.push(Line::raw(format!("{n} goals"))),
+                0 => rows.push(Line::raw("No goals")),
+                1 => rows.push(Line::raw("1 goal")),
+                n => rows.push(Line::raw(format!("{n} goals"))),
             }
             for (i, goal) in goals.iter().enumerate() {
                 if i > 0 {
-                    lines.push(Line::raw(""));
+                    rows.push(Line::raw(""));
                 }
-                lines.extend(goals::goal_lines(goal));
+                let mut lines = goals::goal_lines(goal).into_iter();
+                // A named goal folds under its `case` line; several unnamed ones get a number.
+                let case = goal["userName"].as_str();
+                let header = match case {
+                    Some(_) => lines.next(),
+                    None if goals.len() > 1 => Some(Line::raw(format!("goal {}", i + 1))),
+                    None => None,
+                };
+                if let Some(header) = header {
+                    rows.open(
+                        format!("goal:{}", case.map_or(i.to_string(), String::from)),
+                        header,
+                    );
+                    lines.for_each(|l| rows.push(l));
+                    rows.close();
+                } else {
+                    lines.for_each(|l| rows.push(l));
+                }
             }
+            rows.close();
         }
         if let Some(term) = &self.term_goal {
-            lines.extend([Line::raw(""), Line::from("Expected type".bold())]);
-            lines.extend(goals::goal_lines(&term.value));
+            rows.push(Line::raw(""));
+            rows.open("term".into(), Line::from("Expected type".bold()));
+            goals::goal_lines(&term.value)
+                .into_iter()
+                .for_each(|l| rows.push(l));
+            rows.close();
         }
         let messages: Vec<&Value> = self
             .diagnostics
@@ -439,23 +510,29 @@ impl App {
             })
             .collect();
         let title = if self.all { "All messages" } else { "Messages" };
-        lines.extend([
-            Line::raw(""),
+        rows.push(Line::raw(""));
+        rows.open(
+            "messages".into(),
             Line::from(format!("{title} ({})", messages.len()).bold()),
-        ]);
+        );
         for d in messages {
             let at = &d["range"]["start"];
-            let mut text = d["message"].as_str().unwrap_or_default().lines();
-            lines.push(Line::raw(format!(
+            let mut text = d["message"].as_str().unwrap_or_default().lines().peekable();
+            let first = format!(
                 "{}:{} {}: {}",
                 at["line"].as_u64().unwrap_or_default() + 1,
                 at["character"],
                 severity(d),
                 text.next().unwrap_or_default()
-            )));
-            lines.extend(text.map(|l| Line::raw(format!("  {l}"))));
+            );
+            if text.peek().is_none() {
+                rows.push(Line::raw(first));
+                continue;
+            }
+            rows.open(format!("message:{uri}:{first}"), Line::raw(first));
+            text.for_each(|l| rows.push(Line::raw(format!("  {l}"))));
+            rows.close();
         }
-        lines
     }
 }
 
@@ -607,9 +684,9 @@ mod tests {
         app.on_message(
             &json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":[publish(1, 2, 1, 2, "old")]}]}),
         );
-        shows(&app, &["Messages (1)", "2:2 warning: old"]);
+        shows(&app, &["▾ Messages (1)", "2:2 warning: old"]);
         app.on_message(&json!({"event":"gotServerNotification","args":["textDocument/publishDiagnostics",{"uri":U,"diagnostics":[publish(1, 0, 1, 1, "new")]}]}));
-        shows(&app, &["Messages (1)", "2:0 error: new"]);
+        shows(&app, &["▾ Messages (1)", "2:0 error: new"]);
         hides(&app, "2:2 warning: old");
         app.on_message(&json!({"event":"gotServerNotification","args":["$/lean/fileProgress",{"uri":U,"diagnostics":[]}]}));
         shows(&app, &["2:0 error: new"]);
@@ -649,26 +726,26 @@ mod tests {
             &[
                 "F.lean:2:2",
                 "",
-                "Tactic state",
+                "▾ Tactic state",
                 "1 goal",
                 "n : Nat",
                 "⊢ n + 0 = n",
             ],
         );
-        shows(&app, &["Expected type", "⊢ Nat"]);
+        shows(&app, &["▾ Expected type", "⊢ Nat"]);
     }
 
     #[test]
     fn empty_null_and_several_goals() {
         let mut app = app();
         app.on_message(&json!({"id":"tui-1:4","result":goals(&[])}));
-        shows(&app, &["Tactic state", "No goals"]);
+        shows(&app, &["▾ Tactic state", "No goals"]);
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
         app.on_message(&json!({"id":"tui-1:6","result":null}));
-        hides(&app, "Tactic state");
+        hides(&app, "▾ Tactic state");
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
         app.on_message(&json!({"id":"tui-1:8","result":goals(&["⊢ A", "⊢ B"])}));
-        shows(&app, &["2 goals", "⊢ A", "", "⊢ B"]);
+        shows(&app, &["2 goals", "▾ goal 1", "⊢ A", "", "▾ goal 2", "⊢ B"]);
     }
 
     #[test]
@@ -690,7 +767,7 @@ mod tests {
     #[test]
     fn overtaken_and_cancelled_lookups_are_dropped_silently() {
         let mut app = app();
-        let keys = "q quit  p pin  a all  c copy  o browser  j/k scroll";
+        let keys = KEYS;
         for (id, code) in [(4, -32801), (5, -32800)] {
             app.on_message(
                 &json!({"id":format!("tui-1:{id}"),"error":{"code":code,"message":"File changed."}}),
@@ -711,10 +788,7 @@ mod tests {
             "no Lean server found; open a Lean file in Zed"
         );
         app.connected("http://127.0.0.1:1/?token=t".into());
-        assert_eq!(
-            screen(&app)[19],
-            "q quit  p pin  a all  c copy  o browser  j/k scroll"
-        );
+        assert_eq!(screen(&app)[19], KEYS);
     }
 
     #[test]
@@ -753,19 +827,19 @@ mod tests {
         shows(
             &app,
             &[
-                "Messages (2)",
+                "▾ Messages (2)",
                 "2:2 warning: declaration uses 'sorry'",
-                "1:0 information: spans",
+                "▾ 1:0 information: spans",
                 "  the cursor",
             ],
         );
         hides(&app, "6:0 hint: elsewhere");
         app.on_key(key('a'));
-        shows(&app, &["All messages (3)"]);
+        shows(&app, &["▾ All messages (3)"]);
         shows(&app, &["6:0 hint: elsewhere"]);
         hides(&app, "2:0 error: other file");
         app.on_key(key('a'));
-        shows(&app, &["Messages (2)"]);
+        shows(&app, &["▾ Messages (2)"]);
     }
 
     #[test]
@@ -817,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn keys_scroll_and_quit() {
+    fn keys_move_the_selection_and_the_view_follows() {
         let mut app = app();
         let diagnostics: Vec<Value> = (0..30)
             .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
@@ -826,14 +900,11 @@ mod tests {
         assert_eq!(screen(&app)[0], "F.lean:2:2");
         app.on_key(key('j'));
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(screen(&app)[0], "Messages (30)");
-        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-        app.on_key(key('k'));
         assert_eq!(screen(&app)[0], "F.lean:2:2");
         app.on_key(key('G'));
         assert_eq!(screen(&app)[18], "2:0 error: m29");
         app.on_key(key('k'));
-        assert_eq!(screen(&app)[18], "2:0 error: m28");
+        assert_eq!(screen(&app)[18], "2:0 error: m29");
         app.on_key(key('g'));
         assert_eq!(screen(&app)[0], "F.lean:2:2");
         for quit in [
@@ -846,9 +917,57 @@ mod tests {
     }
 
     #[test]
+    fn the_selection_follows_rows_that_shrink() {
+        let mut app = app();
+        let diagnostics: Vec<Value> = (0..30)
+            .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
+            .collect();
+        app.on_message(&json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":diagnostics}]}));
+        app.on_key(key('G'));
+        app.on_message(&json!({"event":"gotServerNotification","args":["textDocument/publishDiagnostics",{"uri":U,"diagnostics":[]}]}));
+        // Rows: file, blank, Messages (0); the selection sits on the last one.
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        shows(&app, &["▸ Messages (0)"]);
+        app.on_key(key('k'));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        shows(&app, &["▸ Messages (0)"]);
+    }
+
+    #[test]
+    fn enter_folds_the_block_around_the_selection() {
+        let mut app = app();
+        let two = json!({"goals":[
+            {"userName":"pos","hyps":[{"names":["h"],"type":{"text":"A"}}],"type":{"text":"B"}},
+            {"userName":"neg","hyps":[],"type":{"text":"C"}},
+        ]});
+        app.on_message(&json!({"id":"tui-1:4","result":two}));
+        // Rows: file, blank, Tactic state, 2 goals, case pos, h : A, ⊢ B, blank, case neg, ⊢ C.
+        for _ in 0..5 {
+            app.on_key(key('j'));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        shows(&app, &["2 goals", "▸ case pos", "", "▾ case neg", "⊢ C"]);
+        hides(&app, "h : A");
+        // The fold survives new goals for the same case.
+        app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
+        app.on_message(&json!({"id":"tui-1:6","result":two}));
+        hides(&app, "h : A");
+        app.on_key(key(' '));
+        shows(&app, &["▾ case pos", "h : A"]);
+        app.on_key(key('g'));
+        app.on_key(key('j'));
+        app.on_key(key('j'));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        shows(
+            &app,
+            &["F.lean:3:0", "", "▸ Tactic state", "", "▾ Messages (0)"],
+        );
+    }
+
+    #[test]
     fn footer_shows_keys_until_a_status_and_any_key_clears_it() {
         let mut app = app();
-        let keys = "q quit  p pin  a all  c copy  o browser  j/k scroll";
+        let keys = KEYS;
         assert_eq!(screen(&app)[19], keys);
         app.on_key(key('c'));
         assert_eq!(screen(&app)[19], "No goals to copy");
