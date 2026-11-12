@@ -1,5 +1,5 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
-use crate::{bridge, hover, init, msg};
+use crate::{bridge, cursor, hover, init, msg};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -30,6 +30,9 @@ pub enum Action {
 #[derive(Default)]
 pub struct Router {
     next_id: u64,
+    location: Option<Value>,
+    initialize_id: Option<String>,
+    initialize_result: Option<Value>,
     latest: HashMap<String, HashMap<String, Value>>,
     /// Proxy request id -> response destination.
     pending: HashMap<String, Pending>,
@@ -63,6 +66,20 @@ impl Router {
     }
 
     fn on_client(&mut self, m: Value) -> Vec<Action> {
+        if msg::is_request(&m) && msg::method(&m) == Some("initialize") {
+            self.initialize_id = Some(msg::id_key(&m["id"]));
+        }
+        if let Some(loc) = cursor::location(&m)
+            && self.location.as_ref() != Some(&loc)
+        {
+            self.location = Some(loc.clone());
+            let mut out = self.client_message(m);
+            out.push(Action::ToBrowser(bridge::event(
+                "changedCursorLocation",
+                json!([loc]),
+            )));
+            return out;
+        }
         if !msg::is_request(&m)
             && let Some(method) = msg::method(&m)
         {
@@ -74,8 +91,20 @@ impl Router {
                 }
             }
             let copy = bridge::event("sentClientNotification", json!([method, m["params"]]));
+            let closed = method == "textDocument/didClose"
+                && self
+                    .location
+                    .as_ref()
+                    .is_some_and(|loc| loc["uri"] == m["params"]["textDocument"]["uri"]);
             let mut out = self.client_message(m);
             out.push(Action::ToBrowser(copy));
+            if closed {
+                self.location = None;
+                out.push(Action::ToBrowser(bridge::event(
+                    "changedCursorLocation",
+                    json!([null]),
+                )));
+            }
             return out;
         }
         self.client_message(m)
@@ -114,6 +143,10 @@ impl Router {
     }
 
     fn on_server(&mut self, m: Value) -> Vec<Action> {
+        if msg::is_response(&m) && self.initialize_id.as_ref() == Some(&msg::id_key(&m["id"])) {
+            self.initialize_id = None;
+            self.initialize_result = m.get("result").filter(|v| v.is_object()).cloned();
+        }
         if !msg::is_request(&m)
             && let Some(method) = msg::method(&m)
         {
@@ -175,6 +208,10 @@ impl Router {
                 .unwrap_or_default();
         };
         match (call.name.as_str(), call.args.as_slice()) {
+            ("hello", []) => vec![Action::ToBrowser(bridge::reply(
+                &call.id,
+                json!({"location":self.location,"initializeResult":self.initialize_result}),
+            ))],
             ("subscribeServerNotifications", [method]) if method.is_string() => {
                 let values: Vec<Value> = self
                     .latest
@@ -613,5 +650,52 @@ mod notification_tests {
         assert_eq!(out[0], Action::ToServer(m));
         assert!(matches!(&out[1],Action::ToBrowser(v) if v["event"]=="sentClientNotification"));
         assert!(r.latest.values().all(HashMap::is_empty));
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn hello_replays_initialize_and_cursor_without_consuming_lsp() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(
+            json!({"id":1,"method":"initialize","params":{}}),
+        ));
+        let result = json!({"capabilities":{"experimental":{"rpcProvider":{"rpcWireFormat":"v1"}}},"serverInfo":{"version":"4.33.1"}});
+        let response = json!({"id":1,"result":result});
+        assert_eq!(
+            r.handle(Event::FromServer(response.clone())),
+            vec![Action::ToClient(response)]
+        );
+        let m = json!({"id":2,"method":"textDocument/documentHighlight","params":{"textDocument":{"uri":"file:///F.lean"},"position":{"line":1,"character":2}}});
+        let loc = json!({"uri":"file:///F.lean","range":{"start":{"line":1,"character":2},"end":{"line":1,"character":2}}});
+        assert_eq!(
+            r.handle(Event::FromClient(m.clone())),
+            vec![
+                Action::ToServer(m.clone()),
+                Action::ToBrowser(bridge::event("changedCursorLocation", json!([loc])))
+            ]
+        );
+        assert_eq!(
+            r.handle(Event::FromClient(m.clone())),
+            vec![Action::ToServer(m)]
+        );
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:1","call":"hello","args":[]})
+            )),
+            vec![Action::ToBrowser(bridge::reply(
+                "a:1",
+                json!({"location":loc,"initializeResult":result})
+            ))]
+        );
+        r.handle(Event::FromClient(msg::notification(
+            "textDocument/didClose",
+            json!({"textDocument":{"uri":"file:///F.lean"}}),
+        )));
+        assert!(r.location.is_none());
     }
 }
