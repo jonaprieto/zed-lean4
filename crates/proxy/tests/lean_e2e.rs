@@ -2,7 +2,7 @@
 //! Needs elan on PATH: `cargo test -p lean4-ide-proxy --test lean_e2e -- --ignored`.
 mod common;
 
-use common::screen;
+use common::{screen, screen_of};
 use futures_util::{SinkExt, StreamExt};
 use lean4_ide_proxy::codec;
 use serde_json::{Value, json};
@@ -266,9 +266,20 @@ async fn tui_shows_goal_from_real_lean() {
         app::{App, Effect},
         lean, socket_request,
     };
-    use ratatui::crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    use ratatui::{
+        crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        },
+        layout::Size,
     };
+
+    /// Tall enough to show the hover below the goal and the detail panel.
+    const TALL: Size = Size::new(80, 60);
+    /// Whether the screen shows the hover section with something in it.
+    fn hovered(text: &str) -> bool {
+        let mut section = text.lines().skip_while(|l| *l != "▾ At the cursor");
+        section.next().is_some() && section.next().is_some_and(|l| !l.is_empty())
+    }
 
     tokio::time::timeout(std::time::Duration::from_secs(120), async {
         let mut lsp = Lsp::start().await;
@@ -286,9 +297,11 @@ async fn tui_shows_goal_from_real_lean() {
         let hello_id = format!("tui-{pid}:1");
         let mut effects = app.connected(url);
         let mut moved = false;
-        // Goals appear, a click on `Nat` shows its type, `d` opens its definition.
+        // Goals appear, a click on `Nat` shows its type, `d` opens its definition;
+        // Lean's hover shows at the cursor meanwhile.
         let mut clicked = false;
         let mut asked = false;
+        let mut opened = false;
         loop {
             for effect in effects.drain(..) {
                 let Effect::Send(m) = effect else {
@@ -297,11 +310,15 @@ async fn tui_shows_goal_from_real_lean() {
                 if m["call"] == lean::SHOW_DOCUMENT {
                     let uri = m["args"][0]["uri"].as_str().unwrap();
                     assert!(uri.ends_with("Init/Prelude.lean"), "{uri}");
-                    return;
+                    opened = true;
+                    continue;
                 }
                 socket.send(Message::text(m.to_string())).await.unwrap();
             }
-            let text = screen(&app);
+            let text = screen_of(&app, TALL);
+            if opened && hovered(&text) {
+                return;
+            }
             if !clicked && text.contains("⊢ n + 0 = n") {
                 clicked = true;
                 let row = text.lines().position(|l| l.starts_with("n : Nat")).unwrap();

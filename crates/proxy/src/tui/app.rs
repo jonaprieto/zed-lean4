@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::{
     detail::Picked,
-    goals, lean,
+    goals, hover, lean,
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
     view::{self, Text},
@@ -41,6 +41,8 @@ struct Pending {
     goal: Option<String>,
     term: Option<String>,
     diags: Option<String>,
+    /// The hover at the shown location.
+    hover: Option<String>,
     insert: Option<String>,
     popup: Option<String>,
     goto: Option<String>,
@@ -48,8 +50,9 @@ struct Pending {
 }
 
 impl Pending {
-    fn slots(&mut self) -> [&mut Option<String>; 9] {
+    fn slots(&mut self) -> [&mut Option<String>; 10] {
         [
+            &mut self.hover,
             &mut self.hello,
             &mut self.subscribe,
             &mut self.goal,
@@ -69,7 +72,7 @@ impl Pending {
 
     /// Whether `id` asks for the goals, expected type or messages.
     fn is_lookup(&self, id: &str) -> bool {
-        [&self.goal, &self.term, &self.diags]
+        [&self.goal, &self.term, &self.diags, &self.hover]
             .iter()
             .any(|slot| slot.as_deref() == Some(id))
     }
@@ -82,7 +85,7 @@ impl Pending {
     }
 
     fn forget_lookups(&mut self) {
-        (self.goal, self.term, self.diags) = (None, None, None);
+        (self.goal, self.term, self.diags, self.hover) = (None, None, None, None);
     }
 }
 
@@ -108,6 +111,8 @@ pub struct App {
     /// The goals and expected type, typeset once when they arrive.
     goal_texts: Vec<Vec<Text>>,
     term_texts: Vec<Text>,
+    /// Lean's hover at the shown location: signature and docstring.
+    hover: Option<Vec<hover::HoverLine>>,
     cache: Cache,
     /// Interactive diagnostics on the shown line.
     messages: Option<Held>,
@@ -142,6 +147,7 @@ impl App {
             term_goal: None,
             goal_texts: Vec::new(),
             term_texts: Vec::new(),
+            hover: None,
             cache: Cache::default(),
             messages: None,
             trace_children: HashMap::new(),
@@ -310,6 +316,8 @@ impl App {
                 .as_ref()
                 .map_or(vec![], |t| goals::goal_lines(&t.value));
             return self.release_replaced(old);
+        } else if clear_if_awaiting(&mut pending.hover, id) {
+            self.hover = hover::lines(result);
         } else if clear_if_awaiting(&mut pending.insert, id) && result["applied"] == false {
             let reason = result["failureReason"].as_str();
             self.status = Some(reason.unwrap_or("The edit was not applied").into());
@@ -539,7 +547,7 @@ impl App {
         self.location = location;
         let Some(location) = self.location.clone() else {
             self.pending.forget_lookups();
-            (self.goal_texts, self.term_texts) = (vec![], vec![]);
+            (self.goal_texts, self.term_texts, self.hover) = (vec![], vec![], None);
             let held = [
                 self.goals.take(),
                 self.term_goal.take(),
@@ -555,14 +563,18 @@ impl App {
         let start = &location["range"]["start"];
         let params = json!({"textDocument":{"uri":uri},"position":start});
         let (goal_id, goal) = self.request(&session, lean::GET_INTERACTIVE_GOALS, params.clone());
-        let (term_id, term) = self.request(&session, lean::GET_INTERACTIVE_TERM_GOAL, params);
+        let (term_id, term) =
+            self.request(&session, lean::GET_INTERACTIVE_TERM_GOAL, params.clone());
         let line = start["line"].as_u64().unwrap_or_default();
         let range = json!({"lineRange":{"start":line,"end":line + 1}});
         let (diags_id, diags) = self.request(&session, lean::GET_INTERACTIVE_DIAGNOSTICS, range);
+        let hover_args = json!([uri, lean::HOVER, params]);
+        let (hover_id, hover) = self.rpc.call(lean::SEND_CLIENT_REQUEST, hover_args);
         self.pending.diags = Some(diags_id);
         self.pending.goal = Some(goal_id);
         self.pending.term = Some(term_id);
-        vec![goal, term, diags]
+        self.pending.hover = Some(hover_id);
+        vec![goal, term, diags, hover]
     }
 
     /// Asks Lean for the children of a lazily sent trace node.

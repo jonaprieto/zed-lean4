@@ -132,6 +132,19 @@ impl App {
             self.term_texts.iter().for_each(|l| rows.push(l.clone()));
             rows.close();
         }
+        self.build_messages(rows, uri, cursor);
+        if let Some(hover) = &self.hover {
+            rows.push(Line::raw(""));
+            rows.open("hover".into(), Line::from("At the cursor".bold()));
+            hover
+                .iter()
+                .for_each(|(l, hang)| rows.push_hanging(l.clone(), *hang));
+            rows.close();
+        }
+    }
+
+    /// Messages on the cursor's line, or all of the file's with `a`.
+    fn build_messages(&self, rows: &mut Rows, uri: &str, cursor: u64) {
         let messages: Vec<&Value> = self
             .diagnostics
             .get(uri)
@@ -189,5 +202,6 @@ impl App {
             text.for_each(|l| rows.push(Line::raw(format!("  {l}"))));
             rows.close();
         }
+        rows.close();
     }
 }

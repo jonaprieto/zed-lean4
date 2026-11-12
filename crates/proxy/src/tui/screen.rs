@@ -53,7 +53,7 @@ impl Wrapped {
                 .iter()
                 .map(|s| s.content.chars().count())
                 .sum();
-            let wrapped = view::wrap(row.line.clone(), width.into());
+            let wrapped = view::wrap(row.line.clone(), width.into(), row.hang);
             let ends: Vec<usize> = wrapped.iter().skip(1).map(|w| w.1).chain([chars]).collect();
             for ((line, start, indent), end) in wrapped.into_iter().zip(ends) {
                 w.segments.push(Segment {

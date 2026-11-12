@@ -84,7 +84,11 @@ closes the panel. Hold Shift to select text with the mouse instead.
 Messages at the cursor are Lean's interactive messages: expressions in them are
 highlighted and clickable, embedded goals render as goals, and traces fold, with
 children Lean sends on demand fetched when you open them. `a` (all messages)
-lists the plain published diagnostics for the whole file. Lean widgets render
+lists the plain published diagnostics for the whole file.
+
+The last section, At the cursor, is Lean's hover for the term under the editor
+cursor: its signature, highlighted, and its docstring. It follows the cursor,
+so you get the documentation of what you are on without the mouse. Lean widgets render
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
 

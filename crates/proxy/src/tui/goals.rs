@@ -175,6 +175,13 @@ pub fn typeset(head: Text, t: &Value, locals: &[&str]) -> Vec<Text> {
     lines
 }
 
+/// One line of Lean code, highlighted like goal text.
+pub fn code_line(s: &str) -> Line<'static> {
+    let mut spans = Vec::new();
+    highlight(s, &[], &mut spans);
+    Line::from(spans)
+}
+
 /// Lean tokens of `s` as spans: keywords, number and string literals, and locals.
 // ponytail: a lexer, not a parser; bound variables (`fun x =>`) stay uncolored.
 fn highlight(s: &str, locals: &[&str], out: &mut Vec<Span<'static>>) {

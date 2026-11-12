@@ -20,6 +20,7 @@ pub const GOT_SERVER_NOTIFICATION: &str = "gotServerNotification";
 pub const PUBLISH_DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
 pub const RPC_CALL: &str = "$/lean/rpc/call";
 pub const RPC_RELEASE: &str = "$/lean/rpc/release";
+pub const HOVER: &str = "textDocument/hover";
 
 // Lean's widget RPC methods.
 pub const GET_INTERACTIVE_GOALS: &str = "Lean.Widget.getInteractiveGoals";

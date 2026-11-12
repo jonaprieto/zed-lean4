@@ -2,6 +2,7 @@
 pub mod app;
 mod detail;
 pub mod goals;
+mod hover;
 pub mod lean;
 pub mod messages;
 mod rpc;

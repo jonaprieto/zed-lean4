@@ -42,6 +42,8 @@ pub struct Row {
     pub open: bool,
     /// On a header whose children Lean sends on demand: the reference to ask for them.
     pub load: Option<Value>,
+    /// Columns that wrapped continuations sit past the row's own indentation.
+    pub hang: usize,
 }
 
 /// Builds rows, leaving out the bodies of folded blocks.
@@ -64,6 +66,11 @@ impl<'a> Rows<'a> {
     }
 
     pub fn push(&mut self, text: impl Into<Text>) {
+        self.push_hanging(text, HANG);
+    }
+
+    /// Pushes a row whose wrapped continuations hang `hang` columns in.
+    pub fn push_hanging(&mut self, text: impl Into<Text>, hang: usize) {
         if self.hidden.is_none() {
             let Text { line, links } = text.into();
             let fold = self.open.last().cloned();
@@ -74,6 +81,7 @@ impl<'a> Rows<'a> {
                 header: false,
                 open: false,
                 load: None,
+                hang,
             });
         }
     }
@@ -104,6 +112,7 @@ impl<'a> Rows<'a> {
                 header: true,
                 open: !folded,
                 load: None,
+                hang: HANG,
             });
             if folded {
                 self.hidden = Some(self.open.len() + 1);
@@ -134,6 +143,9 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// How far wrapped continuations of goals and messages hang past their line.
+pub const HANG: usize = 4;
+
 /// Characters the `▾ `/`▸ ` fold marker adds before a header.
 pub const MARKER_WIDTH: usize = 2;
 
@@ -162,8 +174,8 @@ pub fn char_at(line: &Line, start: usize, col: usize) -> Option<usize> {
 pub type Wrapped = (Line<'static>, usize, usize);
 
 /// Wraps `line` to `width` columns, at a space when there is one, indenting
-/// continuations four columns past the line's own indentation.
-pub fn wrap(line: Line<'static>, width: usize) -> Vec<Wrapped> {
+/// continuations `hang` columns past the line's own indentation.
+pub fn wrap(line: Line<'static>, width: usize, hang: usize) -> Vec<Wrapped> {
     if width == 0 || line.width() <= width {
         return vec![(line, 0, 0)];
     }
@@ -173,7 +185,7 @@ pub fn wrap(line: Line<'static>, width: usize) -> Vec<Wrapped> {
         .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
         .collect();
     let lead = cells.iter().take_while(|(c, _)| *c == ' ').count();
-    let indent = (lead + 4).min(width / 2);
+    let indent = (lead + hang).min(width / 2);
     let mut out = Vec::new();
     let mut start = 0;
     while start < cells.len() {
@@ -262,7 +274,7 @@ mod tests {
             Span::styled("aaaa bbbb", red),
             Span::raw(" cccccccccccccc"),
         ]);
-        let wrapped = wrap(line.clone(), 12);
+        let wrapped = wrap(line.clone(), 12, HANG);
         let starts: Vec<(usize, usize)> = wrapped.iter().map(|w| (w.1, w.2)).collect();
         assert_eq!(starts, [(0, 0), (11, 6), (16, 6), (22, 6), (28, 6)]);
         assert_eq!(char_at(&line, 11, 0), Some(11));
@@ -281,6 +293,6 @@ mod tests {
             ]
         );
         assert_eq!(lines[1].spans[1].style, red);
-        assert_eq!(wrap(Line::raw("short"), 12).len(), 1);
+        assert_eq!(wrap(Line::raw("short"), 12, HANG).len(), 1);
     }
 }
