@@ -19,6 +19,7 @@ pub const SENT_CLIENT_NOTIFICATION: &str = "sentClientNotification";
 
 // LSP methods.
 pub const PUBLISH_DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
+pub const FILE_PROGRESS: &str = "$/lean/fileProgress";
 pub const RPC_CALL: &str = "$/lean/rpc/call";
 pub const RPC_RELEASE: &str = "$/lean/rpc/release";
 pub const HOVER: &str = "textDocument/hover";
@@ -40,6 +41,8 @@ pub const GO_TO_TYPE: &str = "type";
 pub const RPC_NEEDS_RECONNECT: i64 = -32900;
 /// LSP `ContentModified`: an edit overtook the request.
 pub const CONTENT_MODIFIED: i64 = -32801;
+/// The `kind` of a file progress range where elaboration stopped for good.
+pub const FATAL_ERROR: u64 = 2;
 /// LSP `RequestCancelled`.
 pub const REQUEST_CANCELLED: i64 = -32800;
 

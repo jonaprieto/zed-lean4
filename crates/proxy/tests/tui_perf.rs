@@ -65,10 +65,10 @@ fn large_goals_and_messages_render_within_a_frame() {
     let loc =
         json!({"uri":U,"range":{"start":{"line":3,"character":2},"end":{"line":3,"character":2}}});
     app.on_message(&json!({"id":"tui-1:1","result":{"location":loc,"initializeResult":{}}}));
-    app.on_message(&json!({"id":"tui-1:3","result":"s1"}));
+    app.on_message(&json!({"id":"tui-1:4","result":"s1"}));
 
     // 3 goals x 40 hypotheses x 60 tagged tokens: about 7,200 subterms.
-    let big = json!({"id":"tui-1:4","result":goals(40, 60)});
+    let big = json!({"id":"tui-1:5","result":goals(40, 60)});
     let start = Instant::now();
     app.on_message(&big);
     let goals_reply = start.elapsed();
@@ -84,7 +84,7 @@ fn large_goals_and_messages_render_within_a_frame() {
         "severity":3,"message":trace(5, 4, "t")}),
     );
     let start = Instant::now();
-    app.on_message(&json!({"id":"tui-1:6","result":diags}));
+    app.on_message(&json!({"id":"tui-1:7","result":diags}));
     let diags_reply = start.elapsed();
 
     let mut terminal = Terminal::new(TestBackend::new(120, 50)).unwrap();

@@ -394,8 +394,12 @@ async fn tui_shows_interactive_messages_from_real_lean() {
                 socket.send(Message::text(m.to_string())).await.unwrap();
             }
             let text = screen(&app);
-            // The detail panel shows the clicked binder with its type.
-            if clicked && text.lines().any(|l| l.trim_end() == "n : Nat") {
+            // The detail panel shows the clicked binder with its type, and
+            // the header says Lean checked the whole file.
+            if clicked
+                && text.lines().any(|l| l.trim_end() == "n : Nat")
+                && text.lines().next().is_some_and(|l| l.contains("✓ checked"))
+            {
                 return;
             }
             // Published diagnostics show first; the click works once the

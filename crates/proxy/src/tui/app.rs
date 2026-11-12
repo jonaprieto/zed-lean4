@@ -39,6 +39,7 @@ pub enum Effect {
 struct Pending {
     hello: Option<String>,
     subscribe: Option<String>,
+    subscribe_progress: Option<String>,
     /// The goals, expected type and interactive messages at the shown location.
     goal: Option<String>,
     term: Option<String>,
@@ -52,11 +53,12 @@ struct Pending {
 }
 
 impl Pending {
-    fn slots(&mut self) -> [&mut Option<String>; 10] {
+    fn slots(&mut self) -> [&mut Option<String>; 11] {
         [
             &mut self.hover,
             &mut self.hello,
             &mut self.subscribe,
+            &mut self.subscribe_progress,
             &mut self.goal,
             &mut self.term,
             &mut self.diags,
@@ -123,6 +125,8 @@ pub struct App {
     fetching: HashMap<String, String>,
     /// Published diagnostics per file URI.
     diagnostics: HashMap<String, Vec<Value>>,
+    /// The ranges Lean is still elaborating, per file URI.
+    progress: HashMap<String, Vec<Value>>,
     /// Whether the view lists every message of the file, not only the shown line's.
     all_messages: bool,
     /// The selected row, which `enter` folds or unfolds.
@@ -155,6 +159,7 @@ impl App {
             trace_children: HashMap::new(),
             fetching: HashMap::new(),
             diagnostics: HashMap::new(),
+            progress: HashMap::new(),
             all_messages: false,
             selected: 0,
             folded: HashSet::new(),
@@ -176,9 +181,14 @@ impl App {
             lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
             json!([lean::PUBLISH_DIAGNOSTICS]),
         );
+        let (progress_id, subscribe_progress) = self.rpc.call(
+            lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+            json!([lean::FILE_PROGRESS]),
+        );
         self.pending.hello = Some(hello_id);
         self.pending.subscribe = Some(subscribe_id);
-        vec![hello, subscribe]
+        self.pending.subscribe_progress = Some(progress_id);
+        vec![hello, subscribe, subscribe_progress]
     }
 
     pub fn disconnected(&mut self, status: String) {
@@ -192,10 +202,25 @@ impl App {
 
     pub fn on_message(&mut self, m: &Value) -> Vec<Effect> {
         let event = m["event"].as_str();
-        let diagnostics = m["args"][0] == lean::PUBLISH_DIAGNOSTICS;
-        // Progress and other notifications change nothing on screen.
-        if event == Some(lean::GOT_SERVER_NOTIFICATION) && !diagnostics {
-            return vec![];
+        let notification = m["args"][0].as_str();
+        if event == Some(lean::GOT_SERVER_NOTIFICATION) {
+            match notification {
+                Some(lean::PUBLISH_DIAGNOSTICS) => {}
+                Some(lean::FILE_PROGRESS) => {
+                    let params = &m["args"][1];
+                    self.record_progress(params);
+                    // Only the shown file's progress is on screen.
+                    if params["textDocument"]["uri"]
+                        .as_str()
+                        .is_some_and(|uri| self.is_shown(uri))
+                    {
+                        self.dirty();
+                    }
+                    return vec![];
+                }
+                // Other notifications change nothing on screen.
+                _ => return vec![],
+            }
         }
         self.dirty();
         match event {
@@ -203,8 +228,10 @@ impl App {
             Some(lean::GOT_SERVER_NOTIFICATION) => {
                 self.record_diagnostics(&m["args"][1]);
                 // Lean re-elaborated the shown file: its goals may have changed.
-                let shown = self.location.as_ref().map(|l| &l["uri"]);
-                if shown.is_some_and(|uri| *uri == m["args"][1]["uri"]) {
+                if m["args"][1]["uri"]
+                    .as_str()
+                    .is_some_and(|uri| self.is_shown(uri))
+                {
                     return self.show(self.location.clone());
                 }
                 return vec![];
@@ -225,11 +252,7 @@ impl App {
                 self.status = error["message"].as_str().map(String::from);
                 return vec![];
             }
-            let shown = self
-                .location
-                .as_ref()
-                .is_some_and(|l| l["uri"] == uri.as_str());
-            return if shown {
+            return if self.is_shown(&uri) {
                 self.show(self.location.clone())
             } else {
                 vec![]
@@ -287,6 +310,11 @@ impl App {
             self.diagnostics.clear();
             for params in result.as_array().into_iter().flatten() {
                 self.record_diagnostics(params);
+            }
+        } else if clear_if_awaiting(&mut pending.subscribe_progress, id) {
+            self.progress.clear();
+            for params in result.as_array().into_iter().flatten() {
+                self.record_progress(params);
             }
         } else if clear_if_awaiting(&mut pending.popup, id) {
             if let Some(picked) = &mut self.picked {
@@ -638,6 +666,16 @@ impl App {
         }
     }
 
+    /// Keeps the ranges of one `$/lean/fileProgress` notification.
+    fn record_progress(&mut self, params: &Value) {
+        if let (Some(uri), Some(processing)) = (
+            params["textDocument"]["uri"].as_str(),
+            params["processing"].as_array(),
+        ) {
+            self.progress.insert(uri.into(), processing.clone());
+        }
+    }
+
     fn copy(&mut self) -> Vec<Effect> {
         let goals: Vec<String> = self.goal_list().iter().map(goals::goal_text).collect();
         let (false, Some(location)) = (goals.is_empty(), &self.location) else {
@@ -687,6 +725,11 @@ impl App {
     }
 
     /// Forgets the cached rows after a change to what they show.
+    /// Whether the view shows the file at `uri`.
+    fn is_shown(&self, uri: &str) -> bool {
+        self.location.as_ref().is_some_and(|l| l["uri"] == uri)
+    }
+
     fn dirty(&self) {
         self.cache.clear();
     }

@@ -59,6 +59,9 @@ roles! {
     warning: Style::new().fg(Color::Yellow),
     information: Style::new().fg(Color::Blue),
     hint: Style::new().add_modifier(Modifier::DIM),
+    /// File progress in the header: all checked, or still checking.
+    checked: Style::new().fg(Color::Green),
+    checking: Style::new().fg(Color::Yellow),
 }
 
 thread_local! {

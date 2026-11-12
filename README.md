@@ -70,6 +70,12 @@ highlighted in the terminal's theme colors. Goals refresh when the
 cursor moves and when Lean publishes new diagnostics for the file. After a
 proxy restart it reconnects on its own, once a second.
 
+The first line names the file and cursor, then how far Lean has checked the
+file: `⋯ checked through line N` while it elaborates the rest, `✓ checked`
+once it is done, and `✗ stopped at line N` when elaboration gave up there.
+Zed lets extensions color neither the gutter nor line backgrounds, so this is
+where the checked range shows.
+
 Keys: `q`, `Esc` or `Ctrl-C` quit, `p` pins the current goals, `a` shows all
 messages, `c` copies the goals into a comment in the buffer, `j`/`k` or the
 arrow keys move the selection, `g`/`G` jump to the top or bottom, and `Enter`,
@@ -125,7 +131,8 @@ and pick up changes without a restart:
   `dim`, `italic`, `underlined`, `reversed`, `crossed_out`; a list replaces the
   role's own). Roles: `hypothesis`, `goal_prefix`, `inaccessible`, `case_name`,
   `inserted`, `removed`, `keyword`, `literal`, `trace_class`, `selection`,
-  `heading`, `docs`, `error`, `warning`, `information`, `hint`. Unknown roles
+  `heading`, `docs`, `error`, `warning`, `information`, `hint`, `checked`,
+  `checking`. Unknown roles
   and colors show in the view's footer.
 
 ### Abbreviation

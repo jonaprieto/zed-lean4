@@ -95,7 +95,8 @@ impl Tui {
 }
 
 /// What a page call asks for: the widget method of an RPC call, the LSP method
-/// of another client request or notification, or else the call itself.
+/// of another client request or notification or of a subscription, or else
+/// the call itself.
 fn asks_for(m: &Value) -> &str {
     let call = m["call"].as_str().unwrap_or_default();
     let args = &m["args"];
@@ -103,6 +104,8 @@ fn asks_for(m: &Value) -> &str {
         &args[2]["method"]
     } else if [lean::SEND_CLIENT_REQUEST, lean::SEND_CLIENT_NOTIFICATION].contains(&call) {
         &args[1]
+    } else if call == lean::SUBSCRIBE_SERVER_NOTIFICATIONS {
+        &args[0]
     } else {
         return call;
     };
@@ -260,14 +263,19 @@ fn connected_sends_hello_then_subscribe() {
                 lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
                 json!([lean::PUBLISH_DIAGNOSTICS])
             ),
+            page_call(
+                lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+                json!([lean::FILE_PROGRESS])
+            ),
         ]
     );
     assert_eq!(
         [
             app.id(lean::HELLO),
-            app.id(lean::SUBSCRIBE_SERVER_NOTIFICATIONS)
+            app.id(lean::PUBLISH_DIAGNOSTICS),
+            app.id(lean::FILE_PROGRESS)
         ],
-        ["tui-1:1", "tui-1:2"]
+        ["tui-1:1", "tui-1:2", "tui-1:3"]
     );
     assert_eq!(app.page_url(), Some("http://h/?token=t"));
 }
@@ -310,7 +318,7 @@ fn null_hello_location_sends_nothing_and_says_so() {
 fn diagnostics_come_from_subscribe_and_notifications() {
     let mut app = app();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":[publish(1, 2, 1, 2, "old")]}]),
     );
     shows(&app, &["▾ Messages (1)", "2:2 warning: old"]);
@@ -341,6 +349,33 @@ fn a_new_theme_from_zed_redraws_and_bad_roles_show_in_the_footer() {
         app.on_message(&configure(json!({"keyword":"yellow"})))
             .is_empty()
     );
+}
+
+#[test]
+fn the_header_says_how_far_lean_checked_the_shown_file() {
+    let mut app = app();
+    let progress = |ranges: Value| {
+        json!({"event":lean::GOT_SERVER_NOTIFICATION,"args":[lean::FILE_PROGRESS,
+            {"textDocument":{"uri":U,"version":1},"processing":ranges}]})
+    };
+    let range = |line: u64, kind: u64| json!({"range":{"start":{"line":line,"character":0},"end":{"line":40,"character":0}},"kind":kind});
+    // Lean has not reported on the file yet: nothing to say.
+    shows(&app, &["F.lean:2:2"]);
+    assert!(app.on_message(&progress(json!([range(9, 1)]))).is_empty());
+    shows(&app, &["F.lean:2:2  ⋯ checked through line 9"]);
+    app.on_message(&progress(json!([range(0, 1)])));
+    shows(&app, &["F.lean:2:2  ⋯ checking"]);
+    app.on_message(&progress(json!([range(12, lean::FATAL_ERROR)])));
+    shows(&app, &["F.lean:2:2  ✗ stopped at line 13"]);
+    app.on_message(&progress(json!([])));
+    shows(&app, &["F.lean:2:2  ✓ checked"]);
+    // A later view starts from the progress the proxy kept.
+    let mut later = Tui::new();
+    later.connected("http://h/".into());
+    let kept = json!([{"textDocument":{"uri":U,"version":1},"processing":[range(4, 1)]}]);
+    later.reply(lean::FILE_PROGRESS, kept);
+    later.reply(lean::HELLO, hello(loc(1, 2)));
+    shows(&later, &["F.lean:2:2  ⋯ checked through line 4"]);
 }
 
 #[test]
@@ -454,12 +489,12 @@ fn reconnect_clears_the_no_server_status() {
 fn subscribe_reply_replaces_all_diagnostics() {
     let mut app = app();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":[publish(1, 0, 1, 1, "old")]}]),
     );
     shows(&app, &["2:0 error: old"]);
     app.connected("http://127.0.0.1:2/?token=t".into());
-    app.reply(lean::SUBSCRIBE_SERVER_NOTIFICATIONS, json!([]));
+    app.reply(lean::PUBLISH_DIAGNOSTICS, json!([]));
     hides(&app, "2:0 error: old");
 }
 
@@ -482,7 +517,7 @@ fn pin_does_nothing_without_a_location() {
 fn messages_at_the_cursor_line_and_all_toggle() {
     let mut app = app();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":[
             publish(1, 2, 1, 2, "declaration uses 'sorry'"),
             publish(0, 0, 3, 3, "spans\nthe cursor"),
@@ -566,7 +601,7 @@ fn keys_move_the_selection_and_the_view_follows() {
         .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
         .collect();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":diagnostics}]),
     );
     assert_eq!(screen(&app)[0], "F.lean:2:2");
@@ -595,7 +630,7 @@ fn the_selection_follows_rows_that_shrink() {
         .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
         .collect();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":diagnostics}]),
     );
     app.on_key(key('G'));
@@ -843,7 +878,7 @@ fn clicking_a_header_folds_it_and_the_wheel_scrolls() {
         .map(|i| publish(1, 0, 1, 1, &format!("m{i}")))
         .collect();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":diagnostics}]),
     );
     assert_eq!(screen(&app)[2], "▾ Messages (30)");
@@ -862,7 +897,7 @@ fn clicking_a_header_folds_it_and_the_wheel_scrolls() {
 fn interactive_messages_replace_plain_ones_and_load_traces() {
     let mut app = app();
     app.reply(
-        lean::SUBSCRIBE_SERVER_NOTIFICATIONS,
+        lean::PUBLISH_DIAGNOSTICS,
         json!([{"uri":U,"diagnostics":[publish(1, 2, 1, 2, "plain")]}]),
     );
     shows(&app, &["2:2 warning: plain"]);

@@ -87,12 +87,17 @@ impl App {
         let start = &location["range"]["start"];
         let cursor = start["line"].as_u64().unwrap_or_default();
         let pinned = if self.pinned { " [pinned]" } else { "" };
-        rows.push(Line::raw(format!(
+        let mut header = Line::raw(format!(
             "{}:{}:{}{pinned}",
             uri.rsplit('/').next().unwrap_or(uri),
             cursor + 1,
             start["character"]
-        )));
+        ));
+        if let Some(processing) = self.progress.get(uri) {
+            header.spans.push(Span::raw("  "));
+            header.spans.push(progress(processing));
+        }
+        rows.push(header);
         if self.goals.is_some() {
             let goals = self.goal_list();
             rows.push(Line::raw(""));
@@ -224,4 +229,21 @@ fn message_head(d: &Value) -> (String, Line<'static>) {
         Span::raw(": "),
     ]);
     (position, head)
+}
+
+/// How far Lean got with a file, from the ranges it is still elaborating.
+fn progress(processing: &[Value]) -> Span<'static> {
+    let theme = theme::current();
+    let line = |r: &Value| r["range"]["start"]["line"].as_u64().unwrap_or_default();
+    if let Some(fatal) = processing.iter().find(|r| r["kind"] == lean::FATAL_ERROR) {
+        return Span::styled(
+            format!("✗ stopped at line {}", line(fatal) + 1),
+            theme.error,
+        );
+    }
+    match processing.iter().map(line).min() {
+        None => Span::styled("✓ checked", theme.checked),
+        Some(0) => Span::styled("⋯ checking", theme.checking),
+        Some(first) => Span::styled(format!("⋯ checked through line {first}"), theme.checking),
+    }
 }
