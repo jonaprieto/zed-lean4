@@ -14,6 +14,7 @@ use super::{
     goals, hover, lean,
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
+    settings,
     view::{self, Text},
 };
 
@@ -269,6 +270,10 @@ impl App {
         let result = &m["result"];
         let pending = &mut self.pending;
         if clear_if_awaiting(&mut pending.hello, id) {
+            // The run button started this view, but the browser page is wanted.
+            if settings::opens_browser(&result["infoview"]) {
+                return vec![Effect::OpenBrowser, Effect::Quit];
+            }
             return self.cursor_moved(&result["location"]);
         }
         if clear_if_awaiting(&mut pending.subscribe, id) {

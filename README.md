@@ -92,6 +92,27 @@ so you get the documentation of what you are on without the mouse. Lean widgets 
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
 
+### Infoview settings
+
+Both infoviews read `lsp.lean4-ide.settings.infoview` from your Zed settings,
+and pick up changes without a restart:
+
+```json
+"lsp": {
+  "lean4-ide": {
+    "settings": {
+      "infoview": {
+        "open": "terminal"
+      }
+    }
+  }
+}
+```
+
+- `open`: what the gutter run button opens, `"terminal"` (the default) or
+  `"browser"`. With `"browser"` the task opens the browser infoview and exits;
+  the Open Lean Infoview code action always opens the browser.
+
 ### Abbreviation
 
 - Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).

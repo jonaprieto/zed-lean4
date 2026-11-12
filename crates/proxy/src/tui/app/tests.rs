@@ -286,6 +286,18 @@ fn hello_location_requests_both_goals() {
 }
 
 #[test]
+fn hello_opens_the_browser_instead_when_settings_ask() {
+    let mut app = Tui::new();
+    app.connected("http://h/".into());
+    let mut reply = hello(loc(1, 2));
+    reply["infoview"] = json!({"open":"browser"});
+    assert_eq!(
+        app.reply(lean::HELLO, reply),
+        [Effect::OpenBrowser, Effect::Quit]
+    );
+}
+
+#[test]
 fn null_hello_location_sends_nothing_and_says_so() {
     let mut app = Tui::new();
     app.connected("http://h/".into());

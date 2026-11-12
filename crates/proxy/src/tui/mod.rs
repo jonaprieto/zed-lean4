@@ -7,6 +7,7 @@ pub mod lean;
 pub mod messages;
 mod rpc;
 mod screen;
+mod settings;
 pub mod view;
 
 use crate::discover;
