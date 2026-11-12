@@ -17,7 +17,7 @@ pub struct Link {
 }
 
 /// A line and the subterms in it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Text {
     pub line: Line<'static>,
     pub links: Vec<Link>,

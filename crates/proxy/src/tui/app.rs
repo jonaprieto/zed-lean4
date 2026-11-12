@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
+    rc::Rc,
 };
 
 use ratatui::{
@@ -58,6 +59,15 @@ struct Segment {
     indent: usize,
 }
 
+/// All rows wrapped to one width: the screen lines, the segment of a row each
+/// shows, and each row's first screen line.
+struct Wrapped {
+    width: u16,
+    lines: Vec<Line<'static>>,
+    at: Vec<Segment>,
+    first: Vec<usize>,
+}
+
 /// An RPC result and the session that holds its references.
 struct Held {
     uri: String,
@@ -76,6 +86,12 @@ pub struct App {
     pinned: bool,
     goals: Option<Held>,
     term_goal: Option<Held>,
+    /// The goals and expected type, typeset once when they arrive.
+    goal_texts: Vec<Vec<Text>>,
+    term_texts: Vec<Text>,
+    /// Rows and their wrapped lines, rebuilt only after the state they show changes.
+    rows_cache: RefCell<Option<Rc<Vec<view::Row>>>>,
+    wrap_cache: RefCell<Option<Rc<Wrapped>>>,
     /// Interactive diagnostics on the shown line.
     messages: Option<Held>,
     /// Trace children fetched so far, by reference, and the requests fetching them.
@@ -140,6 +156,10 @@ impl App {
             pinned: false,
             goals: None,
             term_goal: None,
+            goal_texts: Vec::new(),
+            term_texts: Vec::new(),
+            rows_cache: RefCell::default(),
+            wrap_cache: RefCell::default(),
             messages: None,
             lazy: HashMap::new(),
             loading: HashMap::new(),
@@ -169,6 +189,7 @@ impl App {
     }
 
     pub fn connected(&mut self, page_url: String) -> Vec<Effect> {
+        self.dirty();
         self.page_url = Some(page_url);
         self.status = None;
         let (hello_id, hello) = self.call("hello", json!([]));
@@ -180,6 +201,7 @@ impl App {
     }
 
     pub fn disconnected(&mut self, status: String) {
+        self.dirty();
         self.page_url = None;
         self.status = Some(status);
         self.sessions.clear();
@@ -192,6 +214,11 @@ impl App {
     }
 
     pub fn on_message(&mut self, m: &Value) -> Vec<Effect> {
+        // Progress and other notifications change nothing on screen.
+        if m["event"] == "gotServerNotification" && m["args"][0] != DIAGNOSTICS {
+            return vec![];
+        }
+        self.dirty();
         match m["event"].as_str() {
             Some("changedCursorLocation") => return self.cursor(&m["args"][0]),
             Some("gotServerNotification") if m["args"][0] == DIAGNOSTICS => {
@@ -297,6 +324,7 @@ impl App {
         } else if take(&mut self.goal, id) {
             let held = self.held(result.get("goals").is_some().then(|| result.clone()));
             let old = std::mem::replace(&mut self.goals, held);
+            self.goal_texts = self.goal_list().iter().map(goals::goal_lines).collect();
             let mut effects = self.unpick_if_gone();
             effects.extend(self.release(old));
             return effects;
@@ -307,9 +335,9 @@ impl App {
             effects.extend(self.release(old));
             let open: Vec<Value> = self
                 .rows()
-                .into_iter()
+                .iter()
                 .filter(|r| r.open)
-                .filter_map(|r| r.load)
+                .filter_map(|r| r.load.clone())
                 .collect();
             for children in open {
                 effects.extend(self.fetch(children));
@@ -318,6 +346,10 @@ impl App {
         } else if take(&mut self.term, id) {
             let held = self.held((!result.is_null()).then(|| result.clone()));
             let old = std::mem::replace(&mut self.term_goal, held);
+            self.term_texts = self
+                .term_goal
+                .as_ref()
+                .map_or(vec![], |t| goals::goal_lines(&t.value));
             let mut effects = self.unpick_if_gone();
             effects.extend(self.release(old));
             return effects;
@@ -347,12 +379,16 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return vec![Effect::Quit],
             KeyCode::Char('p') if self.location.is_some() => {
+                self.dirty();
                 self.pinned = !self.pinned;
                 if !self.pinned && self.latest != self.location {
                     return self.show(self.latest.clone());
                 }
             }
-            KeyCode::Char('a') => self.all = !self.all,
+            KeyCode::Char('a') => {
+                self.dirty();
+                self.all = !self.all;
+            }
             KeyCode::Char('c') => return self.copy(),
             KeyCode::Char('o') if self.page_url.is_some() => return vec![Effect::OpenBrowser],
             KeyCode::Char('o') => self.status = Some("Not connected".into()),
@@ -410,51 +446,36 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(frame.area());
-        let rows = self.rows();
-        let selected = self.selected.min(rows.len().saturating_sub(1));
-        let mut screen = Screen {
-            area: body,
-            lines: Vec::new(),
-        };
-        let (mut lines, mut top, mut bottom) = (Vec::new(), 0, 0);
-        for (i, row) in rows.into_iter().enumerate() {
-            if i == selected {
-                top = lines.len();
-            }
-            let chars = row
-                .line
-                .spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum();
-            let wrapped = view::wrap(row.line, body.width.into());
-            let ends: Vec<usize> = wrapped.iter().skip(1).map(|w| w.1).chain([chars]).collect();
-            for ((mut line, start, indent), end) in wrapped.into_iter().zip(ends) {
-                if i == selected {
-                    line.style = line.style.patch(view::SELECTED);
-                }
-                screen.lines.push(Segment {
-                    row: i,
-                    start,
-                    end,
-                    indent,
-                });
-                lines.push(line);
-            }
-            if i == selected {
-                bottom = lines.len();
-            }
-        }
+        let wrapped = self.wrapped(body.width);
+        let selected = self.selected.min(wrapped.first.len().saturating_sub(1));
+        let top = wrapped.first.get(selected).copied().unwrap_or(0);
+        let bottom = wrapped
+            .first
+            .get(selected + 1)
+            .copied()
+            .unwrap_or(wrapped.lines.len());
         let height = usize::from(body.height);
-        let mut scroll = self.scroll.get().min(lines.len().saturating_sub(height));
+        let mut scroll = self
+            .scroll
+            .get()
+            .min(wrapped.lines.len().saturating_sub(height));
         if self.follow {
             scroll = scroll.max(bottom.saturating_sub(height)).min(top);
         }
         self.scroll.set(scroll);
-        screen.lines.drain(..scroll.min(screen.lines.len()));
-        *self.screen.borrow_mut() = screen;
-        let paragraph =
-            Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0));
+        // Only the visible slice is drawn.
+        let end = (scroll + height).min(wrapped.lines.len());
+        let mut lines = wrapped.lines[scroll..end].to_vec();
+        for (n, line) in lines.iter_mut().enumerate() {
+            if (top..bottom).contains(&(scroll + n)) {
+                line.style = line.style.patch(view::SELECTED);
+            }
+        }
+        *self.screen.borrow_mut() = Screen {
+            area: body,
+            lines: wrapped.at[scroll..end].to_vec(),
+        };
+        let paragraph = Paragraph::new(lines);
         frame.render_widget(paragraph, body);
         if !detail.is_empty() {
             let detail = Paragraph::new(detail)
@@ -694,6 +715,7 @@ impl App {
         self.location = location;
         let Some(location) = self.location.clone() else {
             (self.goal, self.term, self.diags) = (None, None, None);
+            (self.goal_texts, self.term_texts) = (vec![], vec![]);
             let held = [
                 self.goals.take(),
                 self.term_goal.take(),
@@ -813,7 +835,6 @@ impl App {
         self.follow = true;
     }
 
-    /// Folds or unfolds the innermost block around the selected row.
     /// Folds or unfolds the innermost block around the selected row, fetching
     /// trace children Lean has not sent yet.
     fn toggle_fold(&mut self) -> Vec<Effect> {
@@ -826,24 +847,76 @@ impl App {
         if !self.folded.remove(&key) {
             self.folded.insert(key.clone());
         }
-        let Some(header) = rows
-            .into_iter()
+        self.dirty();
+        let Some((i, header)) = rows
+            .iter()
             .enumerate()
             .find(|(_, r)| r.header && r.fold.as_ref() == Some(&key))
         else {
             return vec![];
         };
-        self.selected = header.0;
-        match header.1.load {
-            Some(children) if !header.1.open => self.fetch(children),
+        self.selected = i;
+        match &header.load {
+            Some(children) if !header.open => self.fetch(children.clone()),
             _ => vec![],
         }
     }
 
-    fn rows(&self) -> Vec<view::Row> {
-        let mut rows = Rows::new(&self.folded);
-        self.build(&mut rows);
-        rows.rows
+    /// Forgets the cached rows after a change to what they show.
+    fn dirty(&self) {
+        self.rows_cache.take();
+        self.wrap_cache.take();
+    }
+
+    fn rows(&self) -> Rc<Vec<view::Row>> {
+        self.rows_cache
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let mut rows = Rows::new(&self.folded);
+                self.build(&mut rows);
+                Rc::new(rows.rows)
+            })
+            .clone()
+    }
+
+    fn wrapped(&self, width: u16) -> Rc<Wrapped> {
+        if let Some(w) = self
+            .wrap_cache
+            .borrow()
+            .as_ref()
+            .filter(|w| w.width == width)
+        {
+            return w.clone();
+        }
+        let mut w = Wrapped {
+            width,
+            lines: Vec::new(),
+            at: Vec::new(),
+            first: Vec::new(),
+        };
+        for (i, row) in self.rows().iter().enumerate() {
+            w.first.push(w.lines.len());
+            let chars = row
+                .line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            let wrapped = view::wrap(row.line.clone(), width.into());
+            let ends: Vec<usize> = wrapped.iter().skip(1).map(|w| w.1).chain([chars]).collect();
+            for ((line, start, indent), end) in wrapped.into_iter().zip(ends) {
+                w.at.push(Segment {
+                    row: i,
+                    start,
+                    end,
+                    indent,
+                });
+                w.lines.push(line);
+            }
+        }
+        let w = Rc::new(w);
+        *self.wrap_cache.borrow_mut() = Some(w.clone());
+        w
     }
 
     fn build(&self, rows: &mut Rows) {
@@ -869,11 +942,11 @@ impl App {
                 1 => rows.push(Line::raw("1 goal")),
                 n => rows.push(Line::raw(format!("{n} goals"))),
             }
-            for (i, goal) in goals.iter().enumerate() {
+            for (i, (goal, texts)) in goals.iter().zip(&self.goal_texts).enumerate() {
                 if i > 0 {
                     rows.push(Line::raw(""));
                 }
-                let mut lines = goals::goal_lines(goal).into_iter();
+                let mut lines = texts.iter().cloned();
                 // A named goal folds under its `case` line; several unnamed ones get a number.
                 let case = goal["userName"].as_str();
                 let header = match case {
@@ -894,12 +967,10 @@ impl App {
             }
             rows.close();
         }
-        if let Some(term) = &self.term_goal {
+        if self.term_goal.is_some() {
             rows.push(Line::raw(""));
             rows.open("term".into(), Line::from("Expected type".bold()));
-            goals::goal_lines(&term.value)
-                .into_iter()
-                .for_each(|l| rows.push(l));
+            self.term_texts.iter().for_each(|l| rows.push(l.clone()));
             rows.close();
         }
         let messages: Vec<&Value> = self
