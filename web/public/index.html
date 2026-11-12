@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lean Infoview</title>
+  <link rel="stylesheet" href="/vendor/infoview/index.css">
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 1rem; }
+    #status { white-space: pre-wrap; }
+    button { font: inherit; margin-bottom: 1rem; }
+  </style>
+  <script type="importmap">
+    {"imports": {
+      "@leanprover/infoview": "/vendor/infoview/index.production.min.js",
+      "react": "/vendor/infoview/react.production.min.js",
+      "react-dom": "/vendor/infoview/react-dom.production.min.js",
+      "react/jsx-runtime": "/vendor/infoview/react-jsx-runtime.production.min.js"
+    }}
+  </script>
+  <script type="module" src="/main.js"></script>
+</head>
+<body>
+  <p id="status" role="status">Connecting to Lean...</p>
+  <button id="copy-comment" type="button" disabled>Copy goals to comment</button>
+  <main id="infoview" aria-label="Lean Infoview"></main>
+</body>
+</html>
