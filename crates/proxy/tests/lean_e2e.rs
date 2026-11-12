@@ -37,6 +37,14 @@ impl Lsp {
         let mut child = Command::new(env!("CARGO_BIN_EXE_lean4-ide-proxy"))
             .args(["--", "lake", "serve", "--"])
             .current_dir(fixture_dir())
+            // Keep the launcher link and discovery file out of the real home;
+            // elan still needs to find its toolchains there.
+            .env(
+                "ELAN_HOME",
+                std::env::var_os("ELAN_HOME")
+                    .unwrap_or_else(|| format!("{}/.elan", std::env::var("HOME").unwrap()).into()),
+            )
+            .env("HOME", std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true)

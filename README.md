@@ -52,7 +52,9 @@ Click the run button in the gutter next to any `theorem`, `lemma` or
 `example` (or run the task "Lean: terminal infoview" from `task: spawn`) to get
 the goals, the expected type and the messages at the cursor in Zed's terminal.
 The editor keeps focus, and the view follows the cursor from then on; you only
-open it once per session. It needs `lean4-ide-proxy` on your `PATH`. To put it
+open it once per session. The task runs `~/.cache/lean4-ide/bin/lean4-ide-proxy`,
+which the proxy points at itself whenever it starts, so nothing needs to be on
+your `PATH` and the view always matches the running proxy. To put it
 beside the code instead of at the bottom, set `"terminal": {"dock": "right"}` in
 your Zed settings.
 

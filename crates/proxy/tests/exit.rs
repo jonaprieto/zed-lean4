@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 fn exits_with_server_status_while_stdin_open() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lean4-ide-proxy"))
         .args(["--", "sh", "-c", "exit 3"])
+        // Keep the launcher link and discovery file out of the real home.
+        .env("HOME", std::env::temp_dir())
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
@@ -28,6 +30,8 @@ fn exits_with_server_status_while_stdin_open() {
 fn exits_nonzero_when_server_cannot_spawn_while_stdin_open() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_lean4-ide-proxy"))
         .args(["--", "/nonexistent/binary"])
+        // Keep the launcher link and discovery file out of the real home.
+        .env("HOME", std::env::temp_dir())
         .stdin(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()

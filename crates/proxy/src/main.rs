@@ -68,6 +68,15 @@ async fn serve() -> Result<i32> {
 }
 
 fn publish_discovery(page_url: &str) -> Option<std::path::PathBuf> {
+    let linked = lean4_ide_proxy::discover::launcher()
+        .ok_or_else(|| std::io::Error::other("no home directory"))
+        .and_then(|link| {
+            let exe = std::env::current_exe()?.canonicalize()?;
+            lean4_ide_proxy::discover::link_launcher(&link, &exe)
+        });
+    if let Err(e) = linked {
+        tracing::warn!("terminal infoview launcher unavailable: {e}");
+    }
     let dir = lean4_ide_proxy::discover::dir()?;
     let published = std::env::current_dir()
         .and_then(|d| d.canonicalize())

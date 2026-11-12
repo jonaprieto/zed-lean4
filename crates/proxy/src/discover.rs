@@ -44,6 +44,37 @@ pub fn publish(dir: &Path, root: &Path, url: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Fixed path the Zed task runs, so the terminal infoview needs nothing on PATH.
+pub fn launcher() -> Option<PathBuf> {
+    let home = ["HOME", "USERPROFILE"]
+        .into_iter()
+        .find_map(|k| std::env::var_os(k).filter(|v| !v.is_empty()))?;
+    let name = if cfg!(windows) {
+        "lean4-ide-proxy.exe"
+    } else {
+        "lean4-ide-proxy"
+    };
+    Some(PathBuf::from(home).join(".cache/lean4-ide/bin").join(name))
+}
+
+/// Points `link` at `exe`, replacing whatever proxy it pointed at before.
+pub fn link_launcher(link: &Path, exe: &Path) -> io::Result<()> {
+    if link == exe {
+        return Ok(());
+    }
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = link.with_file_name(format!("lean4-ide-proxy.{}.tmp", std::process::id()));
+    let _ = fs::remove_file(&tmp);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(exe, &tmp)?;
+    // ponytail: Windows symlinks need a privilege, so copy; fails while a TUI runs it.
+    #[cfg(windows)]
+    fs::copy(exe, &tmp)?;
+    fs::rename(&tmp, link)
+}
+
 /// The discovery file and infoview URL of the server that serves `cwd`.
 pub fn find(dir: &Path, cwd: &Path) -> Result<(PathBuf, String), String> {
     let mut entries: Vec<(PathBuf, String, SystemTime, PathBuf)> = Vec::new();
@@ -142,6 +173,18 @@ mod tests {
         assert!(publish(&base.join("link"), Path::new("/p"), "u").is_err());
         assert!(fs::read_dir(base.join("real")).unwrap().next().is_none());
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn link_launcher_follows_the_latest_proxy() {
+        let d = tmp("launcher");
+        let (a, b) = (d.join("a"), d.join("b"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let link = d.join("bin").join("lean4-ide-proxy");
+        link_launcher(&link, &a).unwrap();
+        link_launcher(&link, &b).unwrap();
+        assert_eq!(fs::read_to_string(&link).unwrap(), "b");
     }
 
     #[test]
