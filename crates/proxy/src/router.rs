@@ -10,6 +10,10 @@ pub const KEEPALIVE: Duration = Duration::from_secs(10);
 const LEAN_METHODS: &str = "$/lean/";
 /// Standard LSP requests the page may also send; all of them only read.
 const PAGE_LSP_REQUESTS: &[&str] = &["textDocument/hover"];
+/// How Zed hands over `lsp.lean4-ide.settings`, on start and on every change.
+const DID_CHANGE_CONFIGURATION: &str = "workspace/didChangeConfiguration";
+/// The part of those settings that is meant for infoview clients.
+const INFOVIEW_SETTINGS: &str = "infoview";
 
 fn page_may_request(method: &str) -> bool {
     method.starts_with(LEAN_METHODS) || PAGE_LSP_REQUESTS.contains(&method)
@@ -53,6 +57,8 @@ pub struct Router {
     location: Option<Value>,
     initialize_id: Option<String>,
     initialize_result: Option<Value>,
+    /// The `infoview` settings Zed sent last, which `hello` hands to clients.
+    infoview: Value,
     latest: HashMap<String, HashMap<String, Value>>,
     /// Proxy request id -> response destination.
     pending: HashMap<String, Pending>,
@@ -138,6 +144,9 @@ impl Router {
         if !msg::is_request(&m)
             && let Some(method) = msg::method(&m)
         {
+            if method == DID_CHANGE_CONFIGURATION {
+                self.infoview = m["params"]["settings"][INFOVIEW_SETTINGS].clone();
+            }
             if method == "textDocument/didClose"
                 && let Some(uri) = m["params"]["textDocument"]["uri"].as_str()
             {
@@ -401,7 +410,8 @@ impl Router {
             }
             ("hello", []) => vec![Action::ToBrowser(bridge::reply(
                 &call.id,
-                json!({"location":self.location,"initializeResult":self.initialize_result}),
+                json!({"location":self.location,"initializeResult":self.initialize_result,
+                    "infoview":self.infoview}),
             ))],
             ("subscribeServerNotifications", [method]) if method.is_string() => {
                 let values: Vec<Value> = self
@@ -911,8 +921,21 @@ mod cursor_tests {
             )),
             vec![Action::ToBrowser(bridge::reply(
                 "a:1",
-                json!({"location":loc,"initializeResult":result})
+                json!({"location":loc,"initializeResult":result,"infoview":null})
             ))]
+        );
+        let settings = json!({"settings":{"proxy":true,"infoview":{"open":"browser"}}});
+        r.handle(Event::FromClient(msg::notification(
+            DID_CHANGE_CONFIGURATION,
+            settings,
+        )));
+        let hello = r.handle(Event::FromBrowser(
+            1,
+            json!({"id":"a:2","call":"hello","args":[]}),
+        ));
+        assert!(
+            matches!(&hello[0], Action::ToBrowser(v) if v["result"]["infoview"] == json!({"open":"browser"})),
+            "hello hands over only the infoview settings: {hello:?}"
         );
         r.handle(Event::FromClient(msg::notification(
             "textDocument/didClose",
