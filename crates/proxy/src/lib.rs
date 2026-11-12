@@ -6,6 +6,7 @@ pub mod init;
 pub mod msg;
 pub mod router;
 mod run;
+pub mod server;
 
 pub use run::run;
 
