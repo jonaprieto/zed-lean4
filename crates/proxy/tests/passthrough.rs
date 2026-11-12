@@ -14,7 +14,7 @@ async fn forwards_both_ways_and_stops_when_zed_closes() {
     let (lean_r, mut lean_w) = split(lean);
     let (mut zed_r, mut lean_r) = (BufReader::new(zed_r), BufReader::new(lean_r));
 
-    let req = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let req = json!({"jsonrpc": "2.0", "id": 1, "method": "unknown/request", "params": {}});
     codec::write(&mut zed_w, &req).await.unwrap();
     assert_eq!(codec::read(&mut lean_r).await.unwrap(), Some(req));
 

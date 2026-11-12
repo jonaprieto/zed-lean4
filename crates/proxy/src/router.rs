@@ -1,5 +1,5 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
-use crate::{hover, msg};
+use crate::{hover, init, msg};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -37,7 +37,7 @@ struct HoverJoin {
 impl Router {
     pub fn handle(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::FromClient(m) => self.on_client(m),
+            Event::FromClient(m) => self.on_client(init::rewrite_request(m)),
             Event::FromServer(m) => self.on_server(m),
         }
     }

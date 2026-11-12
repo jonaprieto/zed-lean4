@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod hover;
+pub mod init;
 pub mod msg;
 pub mod router;
 mod run;
