@@ -6,6 +6,19 @@ use std::time::Duration;
 
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
 
+/// Prefix of Lean's own LSP extensions, which the page may always use.
+const LEAN_METHODS: &str = "$/lean/";
+/// Standard LSP requests the page may also send; all of them only read.
+const PAGE_LSP_REQUESTS: &[&str] = &["textDocument/hover"];
+
+fn page_may_request(method: &str) -> bool {
+    method.starts_with(LEAN_METHODS) || PAGE_LSP_REQUESTS.contains(&method)
+}
+
+fn page_may_notify(method: &str) -> bool {
+    method.starts_with(LEAN_METHODS)
+}
+
 /// The file a notification is about: `uri` in diagnostics, `textDocument.uri`
 /// in Lean's file progress.
 fn notification_uri(params: &Value) -> Option<&str> {
@@ -400,9 +413,7 @@ impl Router {
                 vec![Action::ToBrowser(bridge::reply(&call.id, json!(values)))]
             }
             ("sendClientRequest", [uri, method, params])
-                if uri.is_string()
-                    && method.is_string()
-                    && method.as_str().is_some_and(|m| m.starts_with("$/lean/")) =>
+                if uri.is_string() && method.as_str().is_some_and(page_may_request) =>
             {
                 let id = self.proxy_id();
                 self.pending
@@ -414,9 +425,7 @@ impl Router {
                 ))]
             }
             ("sendClientNotification", [uri, method, params])
-                if uri.is_string()
-                    && method.is_string()
-                    && method.as_str().is_some_and(|m| m.starts_with("$/lean/")) =>
+                if uri.is_string() && method.as_str().is_some_and(page_may_notify) =>
             {
                 vec![
                     Action::ToServer(msg::notification(method.as_str().unwrap(), params.clone())),
@@ -776,6 +785,20 @@ mod bridge_tests {
     }
 
     #[test]
+    fn the_page_may_ask_for_hovers() {
+        let mut r = Router::default();
+        let params =
+            json!({"textDocument":{"uri":"file:///F.lean"},"position":{"line":0,"character":1}});
+        assert_eq!(
+            r.handle(Event::FromBrowser(
+                1,
+                json!({"id":"a:1","call":"sendClientRequest","args":["file:///F.lean","textDocument/hover",params]})
+            )),
+            vec![Action::ToServer(msg::request("lean4-ide:1", "textDocument/hover", params))]
+        );
+    }
+
+    #[test]
     fn notifications_acknowledge_and_bad_calls_fail_locally() {
         let mut r = Router::default();
         assert_eq!(
@@ -795,6 +818,8 @@ mod bridge_tests {
             json!({"id":"a:5","call":7,"args":[]}),
             json!({"id":"a:6","call":"sendClientNotification","args":["file:///F.lean","exit",null]}),
             json!({"id":"a:7","call":"sendClientRequest","args":["file:///F.lean","shutdown",null]}),
+            json!({"id":"a:8","call":"sendClientRequest","args":["file:///F.lean","textDocument/rename",{}]}),
+            json!({"id":"a:9","call":"sendClientNotification","args":["file:///F.lean","textDocument/hover",{}]}),
         ] {
             let out = r.handle(Event::FromBrowser(1, m));
             assert!(matches!(out.as_slice(), [Action::ToBrowser(v)] if v.get("error").is_some()));
