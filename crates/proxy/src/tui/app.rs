@@ -10,7 +10,11 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 
+use super::goals;
+
 const DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
+/// Lean's `RpcNeedsReconnect`: the file's worker restarted and dropped the session.
+const NEEDS_RECONNECT: i64 = -32900;
 const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k scroll";
 
 #[derive(Debug, PartialEq)]
@@ -18,6 +22,13 @@ pub enum Effect {
     Send(Value),
     OpenBrowser,
     Quit,
+}
+
+/// An RPC result and the session that holds its references.
+struct Held {
+    uri: String,
+    session: Value,
+    value: Value,
 }
 
 pub struct App {
@@ -29,8 +40,16 @@ pub struct App {
     /// The latest cursor location, pinned or not.
     latest: Option<Value>,
     pinned: bool,
-    goals: Option<Vec<String>>,
-    term_goal: Option<String>,
+    goals: Option<Held>,
+    term_goal: Option<Held>,
+    /// RPC session per file URI.
+    sessions: HashMap<String, Value>,
+    /// Pending `createRpcSession` calls and the file each is for.
+    connects: HashMap<String, String>,
+    /// The file and session of every RPC call still in flight, by id.
+    inflight: HashMap<String, (String, Value)>,
+    /// The file and session of the RPC reply being handled.
+    asked: Option<(String, Value)>,
     diagnostics: HashMap<String, Vec<Value>>,
     all: bool,
     scroll: u16,
@@ -73,6 +92,10 @@ impl App {
             pinned: false,
             goals: None,
             term_goal: None,
+            sessions: HashMap::new(),
+            connects: HashMap::new(),
+            inflight: HashMap::new(),
+            asked: None,
             diagnostics: HashMap::new(),
             all: false,
             scroll: 0,
@@ -100,6 +123,9 @@ impl App {
     pub fn disconnected(&mut self, status: String) {
         self.page_url = None;
         self.status = Some(status);
+        self.sessions.clear();
+        self.connects.clear();
+        self.inflight.clear();
         for slot in self.pending() {
             *slot = None;
         }
@@ -123,17 +149,46 @@ impl App {
         let Some(id) = m["id"].as_str() else {
             return vec![];
         };
+        if let Some(uri) = self.connects.remove(id) {
+            match m.get("error") {
+                Some(error) => self.status = error["message"].as_str().map(String::from),
+                None => _ = self.sessions.insert(uri.clone(), m["result"].clone()),
+            }
+            let shown = self
+                .location
+                .as_ref()
+                .is_some_and(|l| l["uri"] == uri.as_str());
+            return if shown && m.get("error").is_none() {
+                self.show(self.location.clone())
+            } else {
+                vec![]
+            };
+        }
+        // The session an RPC reply came from: its references live there.
+        self.asked = self.inflight.remove(id);
+        if m["error"]["code"].as_i64() == Some(NEEDS_RECONNECT)
+            && let Some((uri, session)) = &self.asked
+            && self.sessions.get(uri) == Some(session)
+        {
+            self.sessions.remove(uri);
+        }
         if !self
             .pending()
             .iter()
             .any(|slot| slot.as_deref() == Some(id))
         {
-            return vec![];
+            // A reply nobody waits for any more still holds references.
+            let stale = self.held(m.get("result").cloned());
+            return self.release(stale);
         }
         if let Some(error) = m.get("error") {
             let was_lookup = take(&mut self.goal, id) || take(&mut self.term, id);
             for slot in self.pending() {
                 take(slot, id);
+            }
+            if was_lookup && error["code"].as_i64() == Some(NEEDS_RECONNECT) {
+                (self.goal, self.term) = (None, None);
+                return self.show(self.location.clone());
             }
             // An edit overtook the request or it was cancelled: not worth a status.
             let overtaken = matches!(error["code"].as_i64(), Some(-32801 | -32800));
@@ -152,14 +207,13 @@ impl App {
                 self.publish(params);
             }
         } else if take(&mut self.goal, id) {
-            self.goals = result["goals"].as_array().map(|goals| {
-                goals
-                    .iter()
-                    .filter_map(|g| g.as_str().map(String::from))
-                    .collect()
-            });
+            let held = self.held(result.get("goals").is_some().then(|| result.clone()));
+            let old = std::mem::replace(&mut self.goals, held);
+            return self.release(old);
         } else if take(&mut self.term, id) {
-            self.term_goal = result["goal"].as_str().map(String::from);
+            let held = self.held((!result.is_null()).then(|| result.clone()));
+            let old = std::mem::replace(&mut self.term_goal, held);
+            return self.release(old);
         } else if take(&mut self.insert, id) && result["applied"] == false {
             let reason = result["failureReason"].as_str();
             self.status = Some(reason.unwrap_or("The edit was not applied").into());
@@ -244,26 +298,72 @@ impl App {
         self.show(self.latest.clone())
     }
 
-    /// Shows `location` and asks for its goals.
+    /// Shows `location` and asks for its goals, opening an RPC session for the file first.
     fn show(&mut self, location: Option<Value>) -> Vec<Effect> {
         self.location = location;
-        let Some(location) = &self.location else {
-            (self.goals, self.term_goal, self.goal, self.term) = (None, None, None, None);
-            return vec![];
+        let Some(location) = self.location.clone() else {
+            (self.goal, self.term) = (None, None);
+            let (goals, term) = (self.goals.take(), self.term_goal.take());
+            let mut effects = self.release(goals);
+            effects.extend(self.release(term));
+            return effects;
         };
-        let uri = location["uri"].clone();
+        let uri = location["uri"].as_str().unwrap_or_default().to_owned();
+        let Some(session) = self.sessions.get(&uri).cloned() else {
+            (self.goal, self.term) = (None, None);
+            if self.connects.values().any(|u| *u == uri) {
+                return vec![];
+            }
+            let (id, connect) = self.call("createRpcSession", json!([uri]));
+            self.connects.insert(id, uri);
+            return vec![connect];
+        };
         let params = json!({"textDocument":{"uri":uri},"position":location["range"]["start"]});
-        let (goal_id, goal) = self.call(
-            "sendClientRequest",
-            json!([uri, "$/lean/plainGoal", params]),
-        );
-        let (term_id, term) = self.call(
-            "sendClientRequest",
-            json!([uri, "$/lean/plainTermGoal", params]),
-        );
+        let mut rpc = |method: &str| {
+            let call = json!({"textDocument":params["textDocument"],"position":params["position"],
+                "sessionId":session,"method":method,"params":params});
+            let (id, call) = self.call("sendClientRequest", json!([uri, "$/lean/rpc/call", call]));
+            self.inflight
+                .insert(id.clone(), (uri.clone(), session.clone()));
+            (id, call)
+        };
+        let (goal_id, goal) = rpc("Lean.Widget.getInteractiveGoals");
+        let (term_id, term) = rpc("Lean.Widget.getInteractiveTermGoal");
         self.goal = Some(goal_id);
         self.term = Some(term_id);
         vec![goal, term]
+    }
+
+    fn held(&self, value: Option<Value>) -> Option<Held> {
+        let (uri, session) = self.asked.clone()?;
+        value.map(|value| Held {
+            uri,
+            session,
+            value,
+        })
+    }
+
+    /// Lets Lean free the references inside a result the view no longer shows.
+    fn release(&mut self, old: Option<Held>) -> Vec<Effect> {
+        let Some(old) = old else { return vec![] };
+        let mut refs = Vec::new();
+        goals::refs(&old.value, &mut refs);
+        if refs.is_empty() || self.sessions.get(&old.uri) != Some(&old.session) {
+            return vec![];
+        }
+        let params = json!({"uri":old.uri,"sessionId":old.session,"refs":refs});
+        let (_, release) = self.call(
+            "sendClientNotification",
+            json!([old.uri, "$/lean/rpc/release", params]),
+        );
+        vec![release]
+    }
+
+    fn goal_list(&self) -> &[Value] {
+        self.goals
+            .as_ref()
+            .and_then(|h| h.value["goals"].as_array())
+            .map_or(&[], Vec::as_slice)
     }
 
     fn publish(&mut self, params: &Value) {
@@ -275,8 +375,8 @@ impl App {
     }
 
     fn copy(&mut self) -> Vec<Effect> {
-        let goals = self.goals.as_ref().filter(|goals| !goals.is_empty());
-        let (Some(goals), Some(location)) = (goals, &self.location) else {
+        let goals: Vec<String> = self.goal_list().iter().map(goals::goal_text).collect();
+        let (false, Some(location)) = (goals.is_empty(), &self.location) else {
             self.status = Some("No goals to copy".into());
             return vec![];
         };
@@ -307,7 +407,8 @@ impl App {
             cursor + 1,
             start["character"]
         ))];
-        if let Some(goals) = &self.goals {
+        if self.goals.is_some() {
+            let goals = self.goal_list();
             lines.extend([Line::raw(""), Line::from("Tactic state".bold())]);
             match goals.len() {
                 0 => lines.push(Line::raw("No goals")),
@@ -318,12 +419,12 @@ impl App {
                 if i > 0 {
                     lines.push(Line::raw(""));
                 }
-                lines.extend(goal.lines().map(Line::raw));
+                lines.extend(goals::goal_lines(goal));
             }
         }
         if let Some(term) = &self.term_goal {
             lines.extend([Line::raw(""), Line::from("Expected type".bold())]);
-            lines.extend(term.lines().map(Line::raw));
+            lines.extend(goals::goal_lines(&term.value));
         }
         let messages: Vec<&Value> = self
             .diagnostics
@@ -383,19 +484,42 @@ mod tests {
     fn goal_requests(first: u64, line: u64, character: u64) -> Vec<Value> {
         let params =
             json!({"textDocument":{"uri":U},"position":{"line":line,"character":character}});
+        let rpc = |id: u64, method: &str| {
+            json!({"id":format!("tui-1:{id}"),"call":"sendClientRequest","args":[U,"$/lean/rpc/call",
+                {"textDocument":{"uri":U},"position":params["position"],"sessionId":"s1","method":method,"params":params}]})
+        };
         vec![
-            json!({"id":format!("tui-1:{first}"),"call":"sendClientRequest","args":[U,"$/lean/plainGoal",params]}),
-            json!({"id":format!("tui-1:{}", first + 1),"call":"sendClientRequest","args":[U,"$/lean/plainTermGoal",params]}),
+            rpc(first, "Lean.Widget.getInteractiveGoals"),
+            rpc(first + 1, "Lean.Widget.getInteractiveTermGoal"),
         ]
     }
 
-    /// Connected, hello answered with `loc(1, 2)`; goal ids are 3 and 4.
+    /// An interactive goal from `"h : A\n⊢ B"`-style text, without references.
+    fn goal(text: &str) -> Value {
+        let mut lines: Vec<&str> = text.lines().collect();
+        let target = lines.pop().unwrap().strip_prefix("⊢ ").unwrap();
+        let hyps: Vec<Value> = lines
+            .iter()
+            .map(|l| {
+                let (names, ty) = l.split_once(" : ").unwrap();
+                json!({"names":names.split(' ').collect::<Vec<_>>(),"type":{"text":ty}})
+            })
+            .collect();
+        json!({"hyps":hyps,"type":{"text":target}})
+    }
+
+    fn goals(texts: &[&str]) -> Value {
+        json!({"goals": texts.iter().map(|t| goal(t)).collect::<Vec<_>>()})
+    }
+
+    /// Connected, hello answered with `loc(1, 2)`, session `s1` open; goal ids are 4 and 5.
     fn app() -> App {
         let mut app = App::new("tui-1".into());
         app.connected("http://127.0.0.1:1/?token=t".into());
         app.on_message(
             &json!({"id":"tui-1:1","result":{"location":loc(1, 2),"initializeResult":{}}}),
         );
+        app.on_message(&json!({"id":"tui-1:3","result":"s1"}));
         app
     }
 
@@ -459,7 +583,12 @@ mod tests {
         let effects = app.on_message(
             &json!({"id":"tui-1:1","result":{"location":loc(1, 2),"initializeResult":{"capabilities":{}}}}),
         );
-        assert_eq!(sent(effects), goal_requests(3, 1, 2));
+        assert_eq!(
+            sent(effects),
+            [json!({"id":"tui-1:3","call":"createRpcSession","args":[U]})]
+        );
+        let effects = app.on_message(&json!({"id":"tui-1:3","result":"s1"}));
+        assert_eq!(sent(effects), goal_requests(4, 1, 2));
     }
 
     #[test]
@@ -492,14 +621,14 @@ mod tests {
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}));
         let note = |uri: &str| json!({"event":"gotServerNotification","args":["textDocument/publishDiagnostics",{"uri":uri,"diagnostics":[]}]});
         assert!(app.on_message(&note("file:///p/G.lean")).is_empty());
-        assert_eq!(sent(app.on_message(&note(U))), goal_requests(7, 4, 0));
+        assert_eq!(sent(app.on_message(&note(U))), goal_requests(8, 4, 0));
     }
 
     #[test]
     fn cursor_moves_request_goals_unless_pinned() {
         let mut app = app();
         let moved = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}));
-        assert_eq!(sent(moved), goal_requests(5, 4, 0));
+        assert_eq!(sent(moved), goal_requests(6, 4, 0));
         shows(&app, &["F.lean:5:0"]);
         app.on_key(key('p'));
         let moved = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(7, 1)]}));
@@ -513,10 +642,8 @@ mod tests {
     #[test]
     fn goals_render_with_header_and_expected_type() {
         let mut app = app();
-        app.on_message(
-            &json!({"id":"tui-1:3","result":{"rendered":"x","goals":["n : Nat\n⊢ n + 0 = n"]}}),
-        );
-        app.on_message(&json!({"id":"tui-1:4","result":{"goal":"Nat","range":{}}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&["n : Nat\n⊢ n + 0 = n"])}));
+        app.on_message(&json!({"id":"tui-1:5","result":goal("⊢ Nat")}));
         shows(
             &app,
             &[
@@ -528,19 +655,19 @@ mod tests {
                 "⊢ n + 0 = n",
             ],
         );
-        shows(&app, &["Expected type", "Nat"]);
+        shows(&app, &["Expected type", "⊢ Nat"]);
     }
 
     #[test]
     fn empty_null_and_several_goals() {
         let mut app = app();
-        app.on_message(&json!({"id":"tui-1:3","result":{"rendered":"","goals":[]}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&[])}));
         shows(&app, &["Tactic state", "No goals"]);
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
-        app.on_message(&json!({"id":"tui-1:5","result":null}));
+        app.on_message(&json!({"id":"tui-1:6","result":null}));
         hides(&app, "Tactic state");
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
-        app.on_message(&json!({"id":"tui-1:7","result":{"goals":["⊢ A","⊢ B"]}}));
+        app.on_message(&json!({"id":"tui-1:8","result":goals(&["⊢ A", "⊢ B"])}));
         shows(&app, &["2 goals", "⊢ A", "", "⊢ B"]);
     }
 
@@ -548,14 +675,14 @@ mod tests {
     fn superseded_replies_are_ignored_and_errors_keep_goals() {
         let mut app = app();
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
-        app.on_message(&json!({"id":"tui-1:3","result":{"goals":["⊢ old"]}}));
-        app.on_message(&json!({"id":"other:5","result":{"goals":["⊢ foreign"]}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&["⊢ old"])}));
+        app.on_message(&json!({"id":"other:6","result":goals(&["⊢ foreign"])}));
         hides(&app, "⊢ old");
         hides(&app, "⊢ foreign");
-        app.on_message(&json!({"id":"tui-1:5","result":{"goals":["⊢ new"]}}));
+        app.on_message(&json!({"id":"tui-1:6","result":goals(&["⊢ new"])}));
         shows(&app, &["⊢ new"]);
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
-        app.on_message(&json!({"id":"tui-1:7","error":{"code":-32602,"message":"bad params"}}));
+        app.on_message(&json!({"id":"tui-1:8","error":{"code":-32602,"message":"bad params"}}));
         shows(&app, &["⊢ new"]);
         assert_eq!(screen(&app)[19], "bad params");
     }
@@ -564,14 +691,14 @@ mod tests {
     fn overtaken_and_cancelled_lookups_are_dropped_silently() {
         let mut app = app();
         let keys = "q quit  p pin  a all  c copy  o browser  j/k scroll";
-        for (id, code) in [(3, -32801), (4, -32800)] {
+        for (id, code) in [(4, -32801), (5, -32800)] {
             app.on_message(
                 &json!({"id":format!("tui-1:{id}"),"error":{"code":code,"message":"File changed."}}),
             );
             assert_eq!(screen(&app)[19], keys);
         }
         // The slots were cleared: a late success is ignored too.
-        app.on_message(&json!({"id":"tui-1:3","result":{"goals":["⊢ late"]}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&["⊢ late"])}));
         hides(&app, "⊢ late");
     }
 
@@ -596,7 +723,7 @@ mod tests {
         app.on_message(&json!({"id":"tui-1:2","result":[{"uri":U,"diagnostics":[publish(1, 0, 1, 1, "old")]}]}));
         shows(&app, &["2:0 error: old"]);
         app.connected("http://127.0.0.1:2/?token=t".into());
-        app.on_message(&json!({"id":"tui-1:6","result":[]}));
+        app.on_message(&json!({"id":"tui-1:7","result":[]}));
         hides(&app, "2:0 error: old");
     }
 
@@ -606,11 +733,12 @@ mod tests {
         app.connected("http://127.0.0.1:1/?token=t".into());
         app.on_key(key('p'));
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(1, 2)]}));
+        app.on_message(&json!({"id":"tui-1:3","result":"s1"}));
         shows(&app, &["F.lean:2:2"]);
         hides(&app, "[pinned]");
         assert_eq!(
             sent(app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}))),
-            goal_requests(5, 4, 0)
+            goal_requests(6, 4, 0)
         );
     }
 
@@ -645,7 +773,7 @@ mod tests {
         let mut app = app();
         app.on_key(key('p'));
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(6, 3)]}));
-        assert_eq!(sent(app.on_key(key('p'))), goal_requests(5, 6, 3));
+        assert_eq!(sent(app.on_key(key('p'))), goal_requests(6, 6, 3));
         shows(&app, &["F.lean:7:3"]);
         app.on_key(key('p'));
         assert!(app.on_key(key('p')).is_empty());
@@ -656,16 +784,16 @@ mod tests {
         let mut app = app();
         app.on_key(key('c'));
         assert_eq!(screen(&app)[19], "No goals to copy");
-        app.on_message(&json!({"id":"tui-1:3","result":{"goals":["⊢ A","h : B\n⊢ C"]}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&["⊢ A", "h : B\n⊢ C"])}));
         app.on_key(key('p'));
         app.on_message(&json!({"event":"changedCursorLocation","args":[loc(9, 0)]}));
         assert_eq!(
             sent(app.on_key(key('c'))),
             [
-                json!({"id":"tui-1:5","call":"insertText","args":["/-\n⊢ A\n\nh : B\n⊢ C\n-/","above",{"textDocument":{"uri":U},"position":{"line":1,"character":2}}]})
+                json!({"id":"tui-1:6","call":"insertText","args":["/-\n⊢ A\n\nh : B\n⊢ C\n-/","above",{"textDocument":{"uri":U},"position":{"line":1,"character":2}}]})
             ]
         );
-        app.on_message(&json!({"id":"tui-1:5","result":{"applied":false,"failureReason":"x"}}));
+        app.on_message(&json!({"id":"tui-1:6","result":{"applied":false,"failureReason":"x"}}));
         assert_eq!(screen(&app)[19], "x");
     }
 
@@ -684,7 +812,7 @@ mod tests {
     fn disconnect_forgets_pending_requests() {
         let mut app = app();
         app.disconnected("gone".into());
-        app.on_message(&json!({"id":"tui-1:3","result":{"goals":["⊢ late"]}}));
+        app.on_message(&json!({"id":"tui-1:4","result":goals(&["⊢ late"])}));
         hides(&app, "⊢ late");
     }
 
@@ -726,6 +854,86 @@ mod tests {
         assert_eq!(screen(&app)[19], "No goals to copy");
         app.on_key(key('x'));
         assert_eq!(screen(&app)[19], keys);
+    }
+
+    #[test]
+    fn one_session_per_file_and_reconnect_when_lean_drops_it() {
+        let mut app = App::new("tui-1".into());
+        app.connected("http://h/".into());
+        app.on_message(
+            &json!({"id":"tui-1:1","result":{"location":loc(1, 2),"initializeResult":{}}}),
+        );
+        // A second move while the session opens waits for it instead of opening another.
+        assert!(
+            app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}))
+                .is_empty()
+        );
+        assert_eq!(
+            sent(app.on_message(&json!({"id":"tui-1:3","result":"s1"}))),
+            goal_requests(4, 2, 0)
+        );
+        let lost = json!({"id":"tui-1:4","error":{"code":-32900,"message":"Outdated RPC session"}});
+        assert_eq!(
+            sent(app.on_message(&lost)),
+            [json!({"id":"tui-1:6","call":"createRpcSession","args":[U]})]
+        );
+        assert_eq!(screen(&app)[19], KEYS);
+        app.disconnected("gone".into());
+        app.connected("http://h/".into());
+        app.on_message(&json!({"id":"tui-1:9","result":"s2"}));
+        let again = app.on_message(&json!({"event":"changedCursorLocation","args":[loc(3, 0)]}));
+        assert_eq!(
+            sent(again),
+            [json!({"id":"tui-1:9","call":"createRpcSession","args":[U]})]
+        );
+    }
+
+    #[test]
+    fn stale_replies_release_their_references_and_racing_sessions_are_kept() {
+        let mut app = app();
+        app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
+        // The first request (id 4) was superseded; its reply still holds a reference.
+        let stale = json!({"id":"tui-1:4","result":{"goals":[{"hyps":[],"type":{"tag":[{"info":{"__rpcref":"3"}},{"text":"A"}]}}]}});
+        assert_eq!(
+            sent(app.on_message(&stale)),
+            [
+                json!({"id":"tui-1:8","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                {"uri":U,"sessionId":"s1","refs":[{"__rpcref":"3"}]}]})
+            ]
+        );
+        // Moving to another file while its session opens, then back, keeps both sessions.
+        let g = "file:///p/G.lean";
+        let at = |uri: &str| json!({"event":"changedCursorLocation","args":[{"uri":uri,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]});
+        assert_eq!(
+            sent(app.on_message(&at(g))),
+            [json!({"id":"tui-1:9","call":"createRpcSession","args":[g]})]
+        );
+        app.on_message(&at(U));
+        assert!(
+            app.on_message(&json!({"id":"tui-1:9","result":"sg"}))
+                .is_empty()
+        );
+        let back = app.on_message(&at(g));
+        assert_eq!(sent(back)[0]["args"][2]["sessionId"], "sg");
+    }
+
+    #[test]
+    fn replaced_goals_release_their_references() {
+        let mut app = app();
+        let held = json!({"goals":[{"hyps":[],"type":{"tag":[{"info":{"p":"7"}},{"text":"A"}]}}]});
+        assert!(
+            app.on_message(&json!({"id":"tui-1:4","result":held}))
+                .is_empty()
+        );
+        app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
+        assert_eq!(
+            sent(app.on_message(&json!({"id":"tui-1:6","result":goals(&["⊢ B"])}))),
+            [
+                json!({"id":"tui-1:8","call":"sendClientNotification","args":[U,"$/lean/rpc/release",
+                {"uri":U,"sessionId":"s1","refs":[{"p":"7"}]}]})
+            ]
+        );
+        shows(&app, &["⊢ B"]);
     }
 
     #[test]

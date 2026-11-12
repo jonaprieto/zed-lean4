@@ -34,7 +34,7 @@ async fn tui_shows_the_goal_at_the_zed_cursor() {
         let (lr, mut lw) = split(lean);
         let mut zr = BufReader::new(zr);
 
-        // Fake Lean: answers initialize, the two goal requests, and anything else with null.
+        // Fake Lean: answers initialize, the RPC session and goals, and anything else with null.
         let fake_lean = tokio::spawn(async move {
             let mut lr = BufReader::new(lr);
             while let Some(m) = codec::read(&mut lr).await.unwrap() {
@@ -43,9 +43,14 @@ async fn tui_shows_the_goal_at_the_zed_cursor() {
                 };
                 let result = match m["method"].as_str() {
                     Some("initialize") => json!({"capabilities":{}}),
-                    Some("$/lean/plainGoal") => {
+                    Some("$/lean/rpc/connect") => json!({"sessionId":"s1"}),
+                    Some("$/lean/rpc/call")
+                        if m["params"]["method"] == "Lean.Widget.getInteractiveGoals" =>
+                    {
+                        assert_eq!(m["params"]["sessionId"], "s1");
                         assert_eq!(m["params"]["position"], json!({"line":1,"character":2}));
-                        json!({"rendered":"..","goals":["n : Nat\n⊢ n + 0 = n"]})
+                        json!({"goals":[{"hyps":[{"names":["n"],"type":{"text":"Nat"}}],
+                            "type":{"tag":[{"info":{"p":"1"}},{"text":"n + 0 = n"}]}}]})
                     }
                     _ => Value::Null,
                 };

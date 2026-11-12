@@ -63,7 +63,9 @@ uses. It finds the running proxy through a discovery file in
 `$XDG_RUNTIME_DIR/lean4-ide`, or `~/.cache/lean4-ide/run` when that is unset
 (`%LOCALAPPDATA%\lean4-ide\run` on Windows), and picks the server whose
 project root contains the directory you ran it from. The file holds the page
-URL with its token, so treat it like the URL itself. Goals refresh when the
+URL with its token, so treat it like the URL itself. Goals come from Lean's
+interactive goal RPC, so hypothesis names, case names and goal diffs are colored
+like in the VS Code infoview. Goals refresh when the
 cursor moves and when Lean publishes new diagnostics for the file. After a
 proxy restart it reconnects on its own, once a second.
 
