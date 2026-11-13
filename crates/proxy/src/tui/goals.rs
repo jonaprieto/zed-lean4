@@ -295,16 +295,12 @@ mod tests {
         })
     }
 
-    fn plain(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
     #[test]
     fn goal_lines_keep_layout_and_mark_names_and_diffs() {
         let t = theme::current();
         let texts = goal_lines(&goal());
         let lines: Vec<&Line> = texts.iter().map(|t| &t.line).collect();
-        let text: Vec<String> = lines.iter().map(|l| plain(l)).collect();
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         assert_eq!(
             text,
             [

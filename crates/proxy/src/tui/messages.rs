@@ -168,10 +168,7 @@ mod tests {
     fn render(msg: &Value, folded: &HashSet<String>, lazy: &HashMap<String, Value>) -> Vec<String> {
         let mut rows = Rows::new(folded);
         message(&mut rows, lazy, "m", Line::raw("1:0 error: "), msg);
-        rows.rows
-            .iter()
-            .map(|r| r.line.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect()
+        rows.rows.iter().map(|r| r.line.to_string()).collect()
     }
 
     fn trace(cls: &str, msg: &str, children: Value, collapsed: bool) -> Value {
@@ -193,7 +190,7 @@ mod tests {
         let row = &rows.rows[0];
         assert_eq!(rows.rows.len(), 1);
         assert!(!row.header);
-        let text: String = row.line.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text = row.line.to_string();
         assert_eq!(text, "1:0 error: type mismatch h");
         assert_eq!(row.links[0].start, 25);
         assert_eq!(row.links[0].info, json!({"p":"1"}));

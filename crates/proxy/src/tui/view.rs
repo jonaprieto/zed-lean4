@@ -229,10 +229,6 @@ mod tests {
     use super::*;
     use ratatui::style::Color;
 
-    fn plain(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
     #[test]
     fn folded_blocks_keep_their_header_and_hide_their_body() {
         let folded = HashSet::from(["inner".to_owned()]);
@@ -250,7 +246,7 @@ mod tests {
         let got: Vec<(String, Option<&str>, bool)> = rows
             .rows
             .iter()
-            .map(|r| (plain(&r.line), r.fold.as_deref(), r.header))
+            .map(|r| (r.line.to_string(), r.fold.as_deref(), r.header))
             .collect();
         assert_eq!(
             got,
@@ -279,7 +275,7 @@ mod tests {
         assert_eq!(char_at(&line, 0, 7), Some(7));
         assert_eq!(char_at(&line, 28, 5), None);
         let lines: Vec<Line> = wrapped.into_iter().map(|w| w.0).collect();
-        let text: Vec<String> = lines.iter().map(plain).collect();
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(
             text,
             [
