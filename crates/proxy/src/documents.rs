@@ -51,6 +51,19 @@ impl Documents {
         }
     }
 
+    /// The line of `uri` at an LSP `position`, and the byte offset of the
+    /// position in it; `None` past the last line or for a file not open.
+    pub fn line_at(&self, uri: &str, position: &Value) -> Option<(&str, usize)> {
+        let text = &self.0.get(uri)?.text;
+        let line = usize::try_from(position["line"].as_u64()?).ok()?;
+        let start = match line {
+            0 => 0,
+            n => text.match_indices('\n').nth(n - 1)?.0 + 1,
+        };
+        let end = text[start..].find('\n').map_or(text.len(), |n| start + n);
+        Some((&text[start..end], offset(text, position) - start))
+    }
+
     /// The `didClose` and `didOpen` that make Lean start `uri` over from its
     /// current text, or `None` when the file is not open.
     pub fn reopen(&self, uri: &str) -> Option<[Value; 2]> {
@@ -159,6 +172,23 @@ mod tests {
             json!({"textDocument":{"uri":URI}}),
         ));
         assert!(docs.reopen(URI).is_none());
+    }
+
+    #[test]
+    fn a_position_gives_its_line_and_byte_offset() {
+        let mut docs = Documents::default();
+        docs.observe(&open("def a := 1\n  x : 𝔽 → α\n"));
+        let at = |line: u32, character: u32| {
+            docs.line_at(URI, &json!({"line":line,"character":character}))
+        };
+        // `𝔽` takes two UTF-16 units and four bytes.
+        assert_eq!(at(1, 9), Some(("  x : 𝔽 → α", "  x : 𝔽 ".len())));
+        assert_eq!(at(1, 6), Some(("  x : 𝔽 → α", 6)));
+        assert_eq!(at(5, 0), None, "past the last line");
+        assert!(
+            docs.line_at("file:///other", &json!({"line":0,"character":0}))
+                .is_none()
+        );
     }
 
     #[test]

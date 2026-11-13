@@ -1,6 +1,6 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
 use crate::{
-    bridge, commands, cursor,
+    abbreviations, bridge, commands, cursor,
     documents::{self, Documents},
     hover, init, msg, settings,
 };
@@ -113,6 +113,8 @@ struct HoverJoin {
     goal_id: String,
     response: Option<Value>,
     goal: Option<Option<String>>,
+    /// How to type the symbol under the cursor, if it has abbreviations.
+    note: Option<String>,
 }
 
 impl Router {
@@ -256,6 +258,11 @@ impl Router {
             else {
                 return vec![Action::ToServer(m)];
             };
+            let note = doc["uri"]
+                .as_str()
+                .and_then(|uri| self.documents.line_at(uri, pos))
+                .and_then(|(line, at)| abbreviations::shipped().at(line, at))
+                .map(|(symbol, ways)| abbreviations::note(symbol, ways));
             let params = json!({"textDocument": doc, "position": pos});
             let key = msg::id_key(&m["id"]);
             let id = self.proxy_id();
@@ -264,6 +271,7 @@ impl Router {
                 goal_id: id.clone(),
                 response: None,
                 goal: None,
+                note,
             };
             self.pending.insert(id, Pending::Goal(key.clone()));
             self.hovers.insert(key, join);
@@ -582,9 +590,10 @@ impl Router {
             return vec![];
         }
         let join = self.hovers.remove(key).expect("checked above");
+        let sections = join.goal.flatten().into_iter().chain(join.note);
         vec![Action::ToClient(hover::merge_hover(
             join.response.unwrap(),
-            join.goal.unwrap(),
+            sections,
         ))]
     }
 }
@@ -725,6 +734,29 @@ mod tests {
         assert_eq!(
             r.handle(Event::FromServer(hover_resp(json!(7)))),
             vec![Action::ToClient(hover_resp(json!(7)))]
+        );
+    }
+
+    #[test]
+    fn hovering_a_symbol_teaches_how_to_type_it() {
+        let mut r = Router::default();
+        r.handle(Event::FromClient(msg::notification(
+            documents::DID_OPEN,
+            json!({"textDocument":{"uri":"file:///F.lean","languageId":"lean4","version":1,
+                "text":"example :\n  α → α := id\n"}}),
+        )));
+        r.handle(Event::FromClient(hover_req(json!(7))));
+        r.handle(Event::FromServer(
+            json!({"jsonrpc": "2.0", "id": "lean4-ide:1", "result": null}),
+        ));
+        let out = r.handle(Event::FromServer(hover_resp(json!(7))));
+        let [Action::ToClient(m)] = out.as_slice() else {
+            panic!("{out:?}")
+        };
+        let value = m["result"]["contents"]["value"].as_str().unwrap();
+        assert!(
+            value.starts_with("doc\n\n---\n\nType `α` with `\\a`"),
+            "{value}"
         );
     }
 

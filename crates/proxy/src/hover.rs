@@ -1,5 +1,9 @@
-//! Adds the `$/lean/plainGoal` result to a `textDocument/hover` response.
+//! Adds the `$/lean/plainGoal` result, and how to type the symbol under the
+//! cursor, to a `textDocument/hover` response.
 use serde_json::{Value, json};
+
+/// What separates the hover's sections, as markdown.
+const RULE: &str = "\n\n---\n\n";
 
 /// `result.rendered` of a plainGoal response; None for null results and errors.
 pub fn rendered_goal(plain_goal_response: &Value) -> Option<String> {
@@ -12,23 +16,25 @@ pub fn rendered_goal(plain_goal_response: &Value) -> Option<String> {
     )
 }
 
-/// Appends `goal` below the hover text. Errors and non-markdown hovers pass through.
-pub fn merge_hover(mut response: Value, goal: Option<String>) -> Value {
-    let Some(goal) = goal else { return response };
-    if response.get("error").is_some() {
+/// Appends `sections` below the hover text, each after a rule: the goal at
+/// the position, how to type the symbol there. Errors and non-markdown hovers
+/// pass through.
+pub fn merge_hover(mut response: Value, sections: impl IntoIterator<Item = String>) -> Value {
+    let sections: Vec<String> = sections.into_iter().collect();
+    if sections.is_empty() || response.get("error").is_some() {
         return response;
     }
+    let added = sections.join(RULE);
     match response.get_mut("result") {
         Some(result) if result.is_null() => {
-            *result = json!({"contents": {"kind": "markdown", "value": goal}});
+            *result = json!({"contents": {"kind": "markdown", "value": added}});
         }
         Some(result) => {
             if let Some(contents) = result.get_mut("contents")
                 && contents.get("kind").and_then(Value::as_str) == Some("markdown")
                 && let Some(text) = contents.get("value").and_then(Value::as_str)
             {
-                let merged = format!("{text}\n\n---\n\n{goal}");
-                contents["value"] = json!(merged);
+                contents["value"] = json!(format!("{text}{RULE}{added}"));
             }
         }
         None => {}
@@ -74,6 +80,16 @@ mod tests {
             golden("hover_rfl.json")["result"]["range"]
         );
         assert_eq!(merged["id"], json!(2));
+    }
+
+    #[test]
+    fn every_section_follows_the_hover_text_in_order() {
+        let hover = json!({"id": 3, "result": {"contents": {"kind": "markdown", "value": "doc"}}});
+        let merged = merge_hover(hover, ["G".to_owned(), "Type `α` with `\\a`.".to_owned()]);
+        assert_eq!(
+            merged["result"]["contents"]["value"],
+            "doc\n\n---\n\nG\n\n---\n\nType `α` with `\\a`."
+        );
     }
 
     #[test]

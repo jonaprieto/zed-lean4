@@ -1,3 +1,4 @@
+pub mod abbreviations;
 pub mod bridge;
 pub mod codec;
 pub mod commands;

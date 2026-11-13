@@ -189,7 +189,12 @@ or not.
 
 ### Abbreviation
 
-- Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
+- Type a Lean abbreviation such as `\alpha` or `\to` and accept the completion
+  (Tab or Enter) to get `α` or `→`; Zed matches the
+  [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json)
+  as you type. Zed extensions cannot rewrite text on space the way VS Code does.
+- Hovering a symbol says how to type it, for example "Type `α` with `\a`,
+  `\Ga` or `\alpha`."
 
 ### Nested Lean project
 
