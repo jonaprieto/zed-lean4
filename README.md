@@ -257,26 +257,29 @@ window. Items marked (proxy) depend on it.
 - [x] Goal state at the cursor in hover, via `$/lean/plainGoal`
 - [x] Browser infoview following the editor cursor
 - [x] Terminal infoview (goals, expected type, messages) in Zed's terminal
-- [ ] Tactic goals with hypotheses, case names and goal diffs
-- [ ] Expected type (term goal)
-- [ ] Messages at the cursor and an All Messages view
-- [ ] Hypothesis filters: hide types, instances, inaccessible names, let values; reverse order
-- [ ] Pin and pause
-- [ ] Hover inside goals and go to definition from the infoview
+- [x] Tactic goals with hypotheses, case names and goal diffs
+- [x] Expected type (term goal)
+- [x] Messages at the cursor and an All Messages view
+- [ ] Hypothesis filters in the terminal infoview: hide types, instances, inaccessible names, let values; reverse order
+- [x] Pin
+- [ ] Pause
+- [x] Hover inside goals and go to definition from the infoview
 - [ ] User widgets (ProofWidgets, `@[widget_module]`, panel widgets)
-- [ ] "Try this" suggestions and copy-to-comment, applied back to the Zed buffer
-- [ ] Trace explorer with lazy expansion and search
+- [x] Copy goals to a comment, and edits the browser infoview asks for, applied back to the Zed buffer
+- [x] Trace explorer with lazy expansion
+- [ ] Search in traces
 - [x] File progress (elaboration status) and Restart File
 - [ ] Clear status when the server stops or restarts
 
 ### Editing
 
-- [ ] Unicode input that behaves like VS Code (`\alpha` then space or tab), instead of snippets
-- [ ] Abbreviation hover and a symbol picker
+- [x] Unicode input by completing the shipped snippets (`\alpha` then Tab); Zed extensions cannot rewrite on space
+- [x] Abbreviation hover
+- [ ] Symbol picker
 - [ ] Unsolved-goals and goals-accomplished markers
 - [ ] Fold and unfold all proofs
 - [x] Module hierarchy: imports and imported-by (terminal infoview)
-- [ ] Semantic token highlighting on by default for Lean files
+- [x] Semantic token rules for Lean's own token types (turning semantic tokens on stays a user setting, see Recommended settings)
 - [x] Prompt to restart a file when its imports are stale (Lean reports it as a diagnostic)
 
 ### Toolchain and projects
