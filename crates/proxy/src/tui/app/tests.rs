@@ -379,6 +379,34 @@ fn the_header_says_how_far_lean_checked_the_shown_file() {
 }
 
 #[test]
+fn stale_imports_show_in_the_header_and_r_restarts_the_file() {
+    let mut app = app();
+    // Without stale imports `r` does nothing.
+    assert!(app.on_key(key('r')).is_empty());
+    let stale = json!({"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}},
+        "severity":1,"message":"Imports are out of date and should be rebuilt; use the \"Restart File\" command in your editor."});
+    app.on_message(&json!({"event":lean::GOT_SERVER_NOTIFICATION,
+        "args":[lean::PUBLISH_DIAGNOSTICS,{"uri":U,"diagnostics":[stale]}]}));
+    shows(&app, &["F.lean:2:2  ⚠ imports out of date, r restarts"]);
+    assert_eq!(
+        sent(app.on_key(key('r'))),
+        [page_call(lean::RESTART_FILE, json!([U]))]
+    );
+    app.reply(lean::RESTART_FILE, Value::Null);
+    assert_eq!(footer(&app), "Restarting F.lean");
+    // Lean elaborates the file again and reports it current.
+    app.on_message(&json!({"event":lean::GOT_SERVER_NOTIFICATION,
+        "args":[lean::PUBLISH_DIAGNOSTICS,{"uri":U,"diagnostics":[]}]}));
+    hides(&app, "imports out of date");
+    // A failed restart says why.
+    app.on_message(&json!({"event":lean::GOT_SERVER_NOTIFICATION,
+        "args":[lean::PUBLISH_DIAGNOSTICS,{"uri":U,"diagnostics":[stale]}]}));
+    app.on_key(key('r'));
+    app.fail(lean::RESTART_FILE, -32602, "Lean does not have F.lean open");
+    assert_eq!(footer(&app), "Lean does not have F.lean open");
+}
+
+#[test]
 fn diagnostics_for_the_shown_file_refresh_its_goals() {
     let mut app = app();
     app.on_message(&json!({"event":"changedCursorLocation","args":[loc(4, 0)]}));

@@ -9,7 +9,7 @@ use ratatui::{
 };
 use serde_json::Value;
 
-use super::App;
+use super::{App, file_name};
 use crate::tui::{
     detail, lean, messages,
     screen::{Screen, Wrapped},
@@ -19,6 +19,8 @@ use crate::tui::{
 
 pub(super) const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
 pub(super) const PICKED_KEYS: &str = "d definition  t type  esc close";
+/// The header's note when Lean asks for the shown file to be restarted.
+const STALE_IMPORTS: &str = "⚠ imports out of date, r restarts";
 
 impl App {
     pub fn render(&self, frame: &mut Frame) {
@@ -89,13 +91,19 @@ impl App {
         let pinned = if self.pinned { " [pinned]" } else { "" };
         let mut header = Line::raw(format!(
             "{}:{}:{}{pinned}",
-            uri.rsplit('/').next().unwrap_or(uri),
+            file_name(uri),
             cursor + 1,
             start["character"]
         ));
         if let Some(processing) = self.progress.get(uri) {
             header.spans.push(Span::raw("  "));
             header.spans.push(progress(processing));
+        }
+        if self.imports_out_of_date(uri) {
+            header.spans.push(Span::raw("  "));
+            header
+                .spans
+                .push(Span::styled(STALE_IMPORTS, theme::current().warning));
         }
         rows.push(header);
         if self.goals.is_some() {

@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{
 };
 use serde_json::{Value, json};
 
-use crate::settings;
+use crate::{commands, settings};
 
 use super::{
     detail::Picked,
@@ -51,10 +51,11 @@ struct Pending {
     popup: Option<String>,
     goto: Option<String>,
     open: Option<String>,
+    restart: Option<String>,
 }
 
 impl Pending {
-    fn slots(&mut self) -> [&mut Option<String>; 11] {
+    fn slots(&mut self) -> [&mut Option<String>; 12] {
         [
             &mut self.hover,
             &mut self.hello,
@@ -67,6 +68,7 @@ impl Pending {
             &mut self.popup,
             &mut self.goto,
             &mut self.open,
+            &mut self.restart,
         ]
     }
 
@@ -95,6 +97,11 @@ impl Pending {
 }
 
 /// Clears `slot` when it waits for the reply `id`, and says whether it did.
+/// The last segment of a file URI, as the view names files.
+fn file_name(uri: &str) -> &str {
+    uri.rsplit('/').next().unwrap_or(uri)
+}
+
 fn clear_if_awaiting(slot: &mut Option<String>, id: &str) -> bool {
     let hit = slot.as_deref() == Some(id);
     if hit {
@@ -324,6 +331,9 @@ impl App {
             }
         } else if clear_if_awaiting(&mut pending.goto, id) {
             return self.open_location(result);
+        } else if clear_if_awaiting(&mut pending.restart, id) {
+            let uri = self.location.as_ref().and_then(|l| l["uri"].as_str());
+            self.status = uri.map(|uri| format!("Restarting {}", file_name(uri)));
         } else if clear_if_awaiting(&mut pending.open, id) {
             if result["success"] == false {
                 self.status = Some("Zed could not open the location".into());
@@ -397,6 +407,7 @@ impl App {
                 self.all_messages = !self.all_messages;
             }
             KeyCode::Char('c') => return self.copy(),
+            KeyCode::Char('r') => return self.restart(),
             KeyCode::Char('o') if self.page_url.is_some() => return vec![Effect::OpenBrowser],
             KeyCode::Char('o') => self.status = Some("Not connected".into()),
             KeyCode::Char('j') | KeyCode::Down => self.select(self.selected.saturating_add(1)),
@@ -728,6 +739,27 @@ impl App {
     }
 
     /// Forgets the cached rows after a change to what they show.
+    /// Whether Lean asks for the file at `uri` to be restarted because its
+    /// imports changed.
+    pub(super) fn imports_out_of_date(&self, uri: &str) -> bool {
+        self.diagnostics
+            .get(uri)
+            .is_some_and(|ds| ds.iter().any(commands::imports_out_of_date))
+    }
+
+    /// Asks the proxy to restart the shown file when its imports are stale.
+    fn restart(&mut self) -> Vec<Effect> {
+        let Some(uri) = self.location.as_ref().and_then(|l| l["uri"].as_str()) else {
+            return vec![];
+        };
+        if !self.imports_out_of_date(uri) {
+            return vec![];
+        }
+        let (id, call) = self.rpc.call(lean::RESTART_FILE, json!([uri]));
+        self.pending.restart = Some(id);
+        vec![call]
+    }
+
     /// Whether the view shows the file at `uri`.
     fn is_shown(&self, uri: &str) -> bool {
         self.location.as_ref().is_some_and(|l| l["uri"] == uri)

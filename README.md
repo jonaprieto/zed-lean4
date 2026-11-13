@@ -39,8 +39,8 @@ The proxy serves the page on a random loopback port; the socket needs the token
 in the URL. Anyone with the URL can read the open Lean files and edit them
 through Zed, so keep it private. Lean widgets run inside the page with the same
 access, so only open trusted projects.
-For now, Restart File is a logged no-op, remote worktrees are unsupported, and a
-proxy restart requires reopening the page and resets preferences for the new port.
+For now, remote worktrees are unsupported, and a proxy restart requires
+reopening the page and resets preferences for the new port.
 
 For development, build with `cargo build -p lean4-ide-proxy`, set
 `lsp.lean4-ide.settings.proxy_path` to the absolute binary path, and restart the
@@ -150,6 +150,15 @@ and pick up changes without a restart:
   `heading`, `docs`, `link`, `error`, `warning`, `information`, `hint`,
   `checked`, `checking`. Unknown roles and colors show in the view's footer.
 
+### Restart File
+
+When a file's imports change, Lean reports "Imports are out of date" on the
+file and keeps using the old ones until the file is restarted. The proxy then
+offers a Restart File quick fix in Zed's code actions, the terminal infoview's
+first line says so and `r` restarts the file, and the browser infoview's own
+Restart File button works too. Restarting sends Lean the text Zed has, saved
+or not.
+
 ### Abbreviation
 
 - Abbreviation (unicode character) insertion is supported by [snippets](https://github.com/jonaprieto/zed-lean4/blob/main/snippets/lean%204.json).
@@ -214,7 +223,7 @@ window. Items marked (proxy) depend on it.
 - [ ] User widgets (ProofWidgets, `@[widget_module]`, panel widgets)
 - [ ] "Try this" suggestions and copy-to-comment, applied back to the Zed buffer
 - [ ] Trace explorer with lazy expansion and search
-- [ ] File progress (elaboration status) and Restart File
+- [x] File progress (elaboration status) and Restart File
 - [ ] Clear status when the server stops or restarts
 
 ### Editing
@@ -225,7 +234,7 @@ window. Items marked (proxy) depend on it.
 - [ ] Fold and unfold all proofs
 - [ ] Module hierarchy: imports and imported-by
 - [ ] Semantic token highlighting on by default for Lean files
-- [ ] Prompt to restart a file when its imports are stale (`$/lean/staleDependency`)
+- [x] Prompt to restart a file when its imports are stale (Lean reports it as a diagnostic)
 
 ### Toolchain and projects
 

@@ -10,6 +10,7 @@ pub const CREATE_RPC_SESSION: &str = "createRpcSession";
 pub const SEND_CLIENT_REQUEST: &str = "sendClientRequest";
 pub const SEND_CLIENT_NOTIFICATION: &str = "sendClientNotification";
 pub const SHOW_DOCUMENT: &str = "showDocument";
+pub const RESTART_FILE: &str = "restartFile";
 pub const INSERT_TEXT: &str = "insertText";
 
 // Events the proxy sends the infoview page.
