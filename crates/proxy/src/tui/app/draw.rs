@@ -14,7 +14,7 @@ use crate::tui::{
     detail, lean, messages,
     screen::{Screen, Wrapped},
     theme,
-    view::{Row, Rows},
+    view::{Ops, Row, Rows},
 };
 
 pub(super) const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
@@ -187,11 +187,16 @@ impl App {
             Line::styled(format!("{title} ({count})"), theme::current().heading),
         );
         if let Some(list) = interactive {
-            for (i, d) in list.iter().enumerate() {
-                let (position, head) = message_head(d);
-                let key = format!("message:{uri}:{position}:{i}");
-                messages::message(rows, &self.trace_children, &key, head, &d["message"]);
-            }
+            let typeset = self.cache.messages(|| {
+                let mut ops = Ops::default();
+                for (i, d) in list.iter().enumerate() {
+                    let (position, head) = message_head(d);
+                    let key = format!("message:{uri}:{position}:{i}");
+                    messages::message(&mut ops, &self.trace_children, &key, head, &d["message"]);
+                }
+                ops
+            });
+            rows.replay(&typeset);
             return rows.close();
         }
         for d in messages {

@@ -270,6 +270,7 @@ impl App {
             let current = self.messages.as_ref().map(|h| &h.session);
             if origin.is_some() && origin.as_ref() == current {
                 self.trace_children.insert(key, m["result"].clone());
+                self.cache.clear_messages();
                 return vec![];
             }
             return self
@@ -517,6 +518,7 @@ impl App {
     /// trace children fetched for them, which hold references of the same session.
     fn replace_messages(&mut self, new: Option<Held>) -> Option<Held> {
         let mut old = std::mem::replace(&mut self.messages, new);
+        self.cache.clear_messages();
         // Fetches for the old messages now answer as stale replies and are released.
         self.fetching.clear();
         let children: Vec<Value> = std::mem::take(&mut self.trace_children)
@@ -587,7 +589,7 @@ impl App {
             return vec![];
         }
         theme::set(new);
-        self.dirty();
+        self.cache.clear_messages();
         self.show(self.location.clone())
     }
 

@@ -7,7 +7,7 @@ use ratatui::{
     text::Line,
 };
 
-use super::view::{self, Row};
+use super::view::{self, Ops, Row};
 
 /// A screen line: its row, the row characters `start..end` it shows, and its
 /// wrap indentation.
@@ -101,11 +101,14 @@ impl Screen {
     }
 }
 
-/// Rows and their wrapped lines, rebuilt only after the state they show changes.
+/// Rows and their wrapped lines, rebuilt only after the state they show
+/// changes, and the typeset interactive messages they are built from, which
+/// survive folding.
 #[derive(Default)]
 pub(super) struct Cache {
     rows: RefCell<Option<Rc<Vec<Row>>>>,
     wrapped: RefCell<Option<Rc<Wrapped>>>,
+    messages: RefCell<Option<Rc<Ops>>>,
 }
 
 impl Cache {
@@ -113,6 +116,21 @@ impl Cache {
     pub(super) fn clear(&self) {
         self.rows.take();
         self.wrapped.take();
+    }
+
+    /// Forgets the typeset messages after the messages or their loaded
+    /// children change.
+    pub(super) fn clear_messages(&self) {
+        self.messages.take();
+        self.clear();
+    }
+
+    /// The cached typeset messages, or the ones `build` makes.
+    pub(super) fn messages(&self, build: impl FnOnce() -> Ops) -> Rc<Ops> {
+        self.messages
+            .borrow_mut()
+            .get_or_insert_with(|| Rc::new(build()))
+            .clone()
     }
 
     /// The cached rows, or the ones `build` makes.

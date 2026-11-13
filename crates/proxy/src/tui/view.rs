@@ -143,6 +143,60 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// One step of building rows. Content that is costly to typeset is recorded
+/// once as steps and replayed into `Rows` on every rebuild.
+#[derive(Clone)]
+pub enum Op {
+    Push(Text, usize),
+    Open(String, Text, bool),
+    Load(Value),
+    Close,
+}
+
+/// Records the steps `Rows` would take, for `Rows::replay`.
+#[derive(Default)]
+pub struct Ops(Vec<Op>);
+
+impl Ops {
+    pub fn push(&mut self, text: impl Into<Text>) {
+        self.0.push(Op::Push(text.into(), HANG));
+    }
+
+    pub fn open_as(&mut self, key: String, label: impl Into<Text>, collapsed: bool) {
+        self.0.push(Op::Open(key, label.into(), collapsed));
+    }
+
+    pub fn load(&mut self, children: Value) {
+        self.0.push(Op::Load(children));
+    }
+
+    pub fn close(&mut self) {
+        self.0.push(Op::Close);
+    }
+}
+
+impl Rows<'_> {
+    /// Takes the recorded steps, copying only what shows: the bodies of
+    /// folded blocks are skipped.
+    pub fn replay(&mut self, ops: &Ops) {
+        for op in &ops.0 {
+            // A folded block's own header shows; what is inside it does not.
+            let header_shows = self.hidden.is_none_or(|depth| depth == self.open.len());
+            match (op, self.hidden.is_some()) {
+                (Op::Push(text, hang), false) => self.push_hanging(text.clone(), *hang),
+                (Op::Open(key, label, collapsed), false) => {
+                    self.open_as(key.clone(), label.clone(), *collapsed);
+                }
+                // Nothing inside a folded block shows, so its key is never read.
+                (Op::Open(..), true) => self.open.push(String::new()),
+                (Op::Load(children), _) if header_shows => self.load(children.clone()),
+                (Op::Close, _) => self.close(),
+                (Op::Push(..) | Op::Load(_), _) => {}
+            }
+        }
+    }
+}
+
 /// How far wrapped continuations of goals and messages hang past their line.
 pub const HANG: usize = 4;
 

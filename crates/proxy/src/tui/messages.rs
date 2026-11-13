@@ -6,14 +6,14 @@ use serde_json::Value;
 
 use super::{
     goals, theme,
-    view::{Rows, Text},
+    view::{Ops, Text},
 };
 
 /// Writes one diagnostic: `head`, then its message. A message longer than a
 /// line folds under its first line, keyed by `key`. `lazy` holds the trace
 /// children already fetched, by reference.
 pub fn message(
-    rows: &mut Rows,
+    rows: &mut Ops,
     lazy: &HashMap<String, Value>,
     key: &str,
     head: Line<'static>,
@@ -33,15 +33,15 @@ pub fn message(
     }
 }
 
-struct Writer<'r, 'a> {
-    rows: &'r mut Rows<'a>,
+struct Writer<'r> {
+    rows: &'r mut Ops,
     lazy: &'r HashMap<String, Value>,
     line: Text,
     /// A block whose header is the next flushed line, and whether it starts folded.
     header: Option<(String, bool)>,
 }
 
-impl Writer<'_, '_> {
+impl Writer<'_> {
     fn flush(&mut self) {
         let line = std::mem::take(&mut self.line);
         match self.header.take() {
@@ -162,13 +162,23 @@ fn spans_lines(t: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::view::{Row, Rows};
     use serde_json::json;
     use std::collections::HashSet;
 
-    fn render(msg: &Value, folded: &HashSet<String>, lazy: &HashMap<String, Value>) -> Vec<String> {
+    fn build(msg: &Value, folded: &HashSet<String>, lazy: &HashMap<String, Value>) -> Vec<Row> {
+        let mut ops = Ops::default();
+        message(&mut ops, lazy, "m", Line::raw("1:0 error: "), msg);
         let mut rows = Rows::new(folded);
-        message(&mut rows, lazy, "m", Line::raw("1:0 error: "), msg);
-        rows.rows.iter().map(|r| r.line.to_string()).collect()
+        rows.replay(&ops);
+        rows.rows
+    }
+
+    fn render(msg: &Value, folded: &HashSet<String>, lazy: &HashMap<String, Value>) -> Vec<String> {
+        build(msg, folded, lazy)
+            .iter()
+            .map(|r| r.line.to_string())
+            .collect()
     }
 
     fn trace(cls: &str, msg: &str, children: Value, collapsed: bool) -> Value {
@@ -178,17 +188,9 @@ mod tests {
     #[test]
     fn single_line_messages_with_exprs_stay_on_one_row() {
         let msg = json!({"append":[{"text":"type mismatch "},{"tag":[{"expr":{"tag":[{"info":{"p":"1"}},{"text":"h"}]}},{"text":""}]}]});
-        let none = HashSet::new();
-        let mut rows = Rows::new(&none);
-        message(
-            &mut rows,
-            &HashMap::new(),
-            "m",
-            Line::raw("1:0 error: "),
-            &msg,
-        );
-        let row = &rows.rows[0];
-        assert_eq!(rows.rows.len(), 1);
+        let rows = build(&msg, &HashSet::new(), &HashMap::new());
+        let row = &rows[0];
+        assert_eq!(rows.len(), 1);
         assert!(!row.header);
         let text = row.line.to_string();
         assert_eq!(text, "1:0 error: type mismatch h");
@@ -241,9 +243,8 @@ mod tests {
         let open = HashSet::from(["m.1.2".to_owned()]);
         let rows = render(&root, &open, &HashMap::new());
         assert_eq!(rows[3..], ["▾ [Elab.step] lazy node", "  ⋯"]);
-        let mut built = Rows::new(&open);
-        message(&mut built, &HashMap::new(), "m", Line::raw(""), &root);
-        assert_eq!(built.rows[3].load, Some(json!({"__rpcref":"7"})));
+        let built = build(&root, &open, &HashMap::new());
+        assert_eq!(built[3].load, Some(json!({"__rpcref":"7"})));
         let loaded = HashMap::from([("7".to_owned(), json!([{"text":"child"}]))]);
         assert_eq!(
             render(&root, &open, &loaded)[3..],
