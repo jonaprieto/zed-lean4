@@ -33,6 +33,7 @@ struct Lsp {
     rx: BufReader<ChildStdout>,
     next: i64,
     show_url: Option<String>,
+    initialize_result: Value,
 }
 
 impl Lsp {
@@ -63,13 +64,16 @@ impl Lsp {
             rx,
             next: 0,
             show_url: None,
+            initialize_result: Value::Null,
         };
         let root = format!("file://{}", fixture_dir().display());
-        lsp.request(
-            "initialize",
-            json!({"processId": null, "rootUri": root, "capabilities": {}}),
-        )
-        .await;
+        lsp.initialize_result = lsp
+            .request(
+                "initialize",
+                json!({"processId": null, "rootUri": root, "capabilities": {}}),
+            )
+            .await["result"]
+            .take();
         lsp.notify("initialized", json!({})).await;
         let text = std::fs::read_to_string(fixture_dir().join("Fixture.lean")).unwrap();
         lsp.notify(
@@ -169,6 +173,35 @@ async fn plain_goal_passes_through() {
         json!({"textDocument": {"uri": fixture_uri()}, "position": {"line": 1, "character": 2}});
     let resp = lsp.request("$/lean/plainGoal", pos).await;
     assert_eq!(resp["result"]["goals"], json!(["n : Nat\n⊢ n + 0 = n"]));
+}
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn semantic_token_rules_name_token_types_lean_reports() {
+    let lsp = Lsp::start().await;
+    let legend = &lsp.initialize_result["capabilities"]["semanticTokensProvider"]["legend"];
+    let types: Vec<&str> = legend["tokenTypes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../languages/lean4/semantic_token_rules.json");
+    let rules: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let rules = rules.as_array().expect("a list of rules");
+    assert!(!rules.is_empty());
+    for rule in rules {
+        let token_type = rule["token_type"].as_str().expect("each rule names a type");
+        assert!(
+            types.contains(&token_type),
+            "Lean has no {token_type} tokens: {types:?}"
+        );
+        assert!(
+            rule["style"].as_array().is_some_and(|s| !s.is_empty()),
+            "{rule}"
+        );
+    }
 }
 
 #[tokio::test]

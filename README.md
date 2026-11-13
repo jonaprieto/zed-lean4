@@ -21,6 +21,7 @@ lean --version
 ### Highlight
 
 - For optimal highlighting, set `"semantic_tokens"` to `"combined"`, which will enable LSP semantic tokens highlight in Zed.
+- With semantic tokens on, the `sorry`, `admit` and `stop` tactics are bold and underlined in the keyword color, from the rules in `languages/lean4/semantic_token_rules.json`. Your own `semantic_token_rules` for `leanSorryLike` take precedence.
 
 ### Goal in hover
 
