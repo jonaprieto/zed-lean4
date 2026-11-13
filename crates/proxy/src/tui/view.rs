@@ -44,6 +44,8 @@ pub struct Row {
     pub load: Option<Value>,
     /// Columns that wrapped continuations sit past the row's own indentation.
     pub hang: usize,
+    /// A file that Enter or a click on the row opens in Zed.
+    pub target: Option<String>,
 }
 
 /// Builds rows, leaving out the bodies of folded blocks.
@@ -82,7 +84,17 @@ impl<'a> Rows<'a> {
                 open: false,
                 load: None,
                 hang,
+                target: None,
             });
+        }
+    }
+
+    /// Pushes a row that opens the file at `uri`.
+    pub fn push_target(&mut self, text: impl Into<Text>, uri: &str) {
+        let before = self.rows.len();
+        self.push(text);
+        if let Some(row) = self.rows.get_mut(before) {
+            row.target = Some(uri.to_owned());
         }
     }
 
@@ -113,6 +125,7 @@ impl<'a> Rows<'a> {
                 open: !folded,
                 load: None,
                 hang: HANG,
+                target: None,
             });
             if folded {
                 self.hidden = Some(self.open.len() + 1);

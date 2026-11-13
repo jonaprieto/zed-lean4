@@ -14,6 +14,7 @@ use crate::{commands, settings};
 use super::{
     detail::Picked,
     goals, hover, lean, markdown,
+    modules::{self, Hierarchy},
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
     theme::{self, Theme},
@@ -102,7 +103,7 @@ fn file_name(uri: &str) -> &str {
     uri.rsplit('/').next().unwrap_or(uri)
 }
 
-fn clear_if_awaiting(slot: &mut Option<String>, id: &str) -> bool {
+pub(super) fn clear_if_awaiting(slot: &mut Option<String>, id: &str) -> bool {
     let hit = slot.as_deref() == Some(id);
     if hit {
         *slot = None;
@@ -133,6 +134,8 @@ pub struct App {
     fetching: HashMap<String, String>,
     /// Published diagnostics per file URI.
     diagnostics: HashMap<String, Vec<Value>>,
+    /// The shown file's imports and importers, while their section is open.
+    modules: Hierarchy,
     /// The ranges Lean is still elaborating, per file URI.
     progress: HashMap<String, Vec<Value>>,
     /// Whether the view lists every message of the file, not only the shown line's.
@@ -167,6 +170,7 @@ impl App {
             trace_children: HashMap::new(),
             fetching: HashMap::new(),
             diagnostics: HashMap::new(),
+            modules: Hierarchy::default(),
             progress: HashMap::new(),
             all_messages: false,
             selected: 0,
@@ -283,6 +287,10 @@ impl App {
             return self
                 .rpc
                 .release(Held::new(origin, m.get("result").cloned()));
+        }
+        if let Some(effects) = self.modules.answer(id, m, &mut self.rpc) {
+            self.dirty();
+            return effects;
         }
         if !self.pending.awaits(id) {
             // A reply nobody waits for any more still holds references.
@@ -468,6 +476,9 @@ impl App {
         if row.header && (link.is_none() || on_marker) {
             return self.toggle_fold();
         }
+        if let Some(uri) = row.target.clone() {
+            return self.open_document(&uri);
+        }
         let Some(link) = link.cloned() else {
             return self.unpick();
         };
@@ -626,9 +637,11 @@ impl App {
             return held.into_iter().flat_map(|h| self.rpc.release(h)).collect();
         };
         let uri = location["uri"].as_str().unwrap_or_default().to_owned();
+        let mut effects = self.follow_modules(&uri);
         let Some(session) = self.rpc.session(&uri) else {
             self.pending.forget_lookups();
-            return self.rpc.connect(uri);
+            effects.extend(self.rpc.connect(uri));
+            return effects;
         };
         let start = &location["range"]["start"];
         let params = json!({"textDocument":{"uri":uri},"position":start});
@@ -644,7 +657,25 @@ impl App {
         self.pending.goal = Some(goal_id);
         self.pending.term = Some(term_id);
         self.pending.hover = Some(hover_id);
-        vec![goal, term, diags, hover]
+        effects.extend([goal, term, diags, hover]);
+        effects
+    }
+
+    /// Asks for the module lists of `uri` while their section is open.
+    fn follow_modules(&mut self, uri: &str) -> Vec<Effect> {
+        if self.folded.contains(modules::KEY) {
+            self.modules.follow(uri, &mut self.rpc)
+        } else {
+            vec![]
+        }
+    }
+
+    /// Opens the file at `uri` in Zed.
+    fn open_document(&mut self, uri: &str) -> Vec<Effect> {
+        let show = json!({"uri":uri,"takeFocus":true});
+        let (id, call) = self.rpc.call(lean::SHOW_DOCUMENT, json!([show]));
+        self.pending.open = Some(id);
+        vec![call]
     }
 
     /// Asks Lean for the children of a lazily sent trace node.
@@ -717,6 +748,9 @@ impl App {
         let rows = self.rows();
         // New goals or messages may have left fewer rows than the selection.
         self.selected = self.selected.min(rows.len().saturating_sub(1));
+        if let Some(uri) = rows.get(self.selected).and_then(|r| r.target.clone()) {
+            return self.open_document(&uri);
+        }
         let Some(key) = rows.get(self.selected).and_then(|r| r.fold.clone()) else {
             return vec![];
         };
@@ -732,13 +766,19 @@ impl App {
             return vec![];
         };
         self.selected = i;
-        match &header.load {
-            Some(children) if !header.open => self.fetch(children.clone()),
+        if header.open {
+            return vec![];
+        }
+        if let Some(children) = &header.load {
+            return self.fetch(children.clone());
+        }
+        let uri = self.location.as_ref().and_then(|l| l["uri"].as_str());
+        match uri.map(str::to_owned) {
+            Some(uri) if key == modules::KEY => self.follow_modules(&uri),
             _ => vec![],
         }
     }
 
-    /// Forgets the cached rows after a change to what they show.
     /// Whether Lean asks for the file at `uri` to be restarted because its
     /// imports changed.
     pub(super) fn imports_out_of_date(&self, uri: &str) -> bool {
@@ -765,6 +805,7 @@ impl App {
         self.location.as_ref().is_some_and(|l| l["uri"] == uri)
     }
 
+    /// Forgets the cached rows after a change to what they show.
     fn dirty(&self) {
         self.cache.clear();
     }

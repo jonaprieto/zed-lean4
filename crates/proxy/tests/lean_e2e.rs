@@ -152,6 +152,26 @@ async fn page_call(socket: &mut InfoviewSocket, id: &str, name: &str, args: Valu
     }
 }
 
+/// Opens the browser infoview through Zed's command and connects to its socket
+/// as the page would.
+async fn page_socket(lsp: &mut Lsp) -> InfoviewSocket {
+    let opened = lsp
+        .request(
+            "workspace/executeCommand",
+            json!({"command": "lean4-ide.openInfoview"}),
+        )
+        .await;
+    assert!(opened.get("error").is_none(), "{opened}");
+    let url = lsp.show_url.as_deref().expect("window/showDocument URL");
+    let (origin, query) = url.split_once("/?").unwrap();
+    let ws_url = format!("{}/ws?{query}", origin.replacen("http:", "ws:", 1));
+    let mut request = ws_url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", origin.parse().unwrap());
+    connect_async(request).await.unwrap().0
+}
+
 fn tagged_text(value: &Value) -> String {
     if let Some(text) = value["text"].as_str() {
         return text.into();
@@ -173,6 +193,35 @@ async fn plain_goal_passes_through() {
         json!({"textDocument": {"uri": fixture_uri()}, "position": {"line": 1, "character": 2}});
     let resp = lsp.request("$/lean/plainGoal", pos).await;
     assert_eq!(resp["result"]["goals"], json!(["n : Nat\n⊢ n + 0 = n"]));
+}
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
+async fn infoviews_reach_the_module_hierarchy() {
+    let mut lsp = Lsp::start().await;
+    let mut socket = page_socket(&mut lsp).await;
+    let uri = fixture_uri();
+    let module = page_call(
+        &mut socket,
+        "e2e:1",
+        "sendClientRequest",
+        json!([uri, "$/lean/prepareModuleHierarchy", {"textDocument": {"uri": uri}}]),
+    )
+    .await;
+    assert_eq!(module, json!({"name": "Fixture", "uri": uri}));
+    for (id, method) in [
+        ("e2e:2", "$/lean/moduleHierarchy/imports"),
+        ("e2e:3", "$/lean/moduleHierarchy/importedBy"),
+    ] {
+        let list = page_call(
+            &mut socket,
+            id,
+            "sendClientRequest",
+            json!([uri, method, {"module": module}]),
+        )
+        .await;
+        assert!(list.is_array(), "{method}: {list}");
+    }
 }
 
 #[tokio::test]
@@ -259,21 +308,7 @@ async fn infoview_gets_interactive_goals() {
         });
         lsp.request("textDocument/documentHighlight", position.clone())
             .await;
-        let opened = lsp
-            .request(
-                "workspace/executeCommand",
-                json!({"command": "lean4-ide.openInfoview"}),
-            )
-            .await;
-        assert!(opened.get("error").is_none(), "{opened}");
-        let url = lsp.show_url.as_deref().expect("window/showDocument URL");
-        let (origin, query) = url.split_once("/?").unwrap();
-        let ws_url = format!("{}/ws?{query}", origin.replacen("http:", "ws:", 1));
-        let mut request = ws_url.into_client_request().unwrap();
-        request
-            .headers_mut()
-            .insert("Origin", origin.parse().unwrap());
-        let (mut socket, _) = connect_async(request).await.unwrap();
+        let mut socket = page_socket(&mut lsp).await;
         let hello = page_call(&mut socket, "e2e:1", "hello", json!([])).await;
         assert!(
             hello["initializeResult"]["capabilities"].is_object(),

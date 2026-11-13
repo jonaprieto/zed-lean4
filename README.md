@@ -134,11 +134,16 @@ highlighted and clickable, embedded goals render as goals, and traces fold, with
 children Lean sends on demand fetched when you open them. `a` (all messages)
 lists the plain published diagnostics for the whole file.
 
-The last section, At the cursor, is Lean's hover for the term under the editor
-cursor: its signature, highlighted, and its docstring. It follows the cursor,
-so you get the documentation of what you are on without the mouse. Lean widgets render
+At the cursor is Lean's hover for the term under the editor cursor: its
+signature, highlighted, and its docstring. It follows the cursor, so you get
+the documentation of what you are on without the mouse. Lean widgets render
 HTML, which a terminal cannot show; press `o` to open the browser infoview for
 those.
+
+The last section, Modules, starts folded. Opened, it lists the modules the
+shown file imports and the ones that import it, as Lean's module hierarchy
+reports them, and keeps following the shown file; `Enter` or a click on a
+module opens it in Zed.
 
 ### Infoview settings
 
@@ -270,7 +275,7 @@ window. Items marked (proxy) depend on it.
 - [ ] Abbreviation hover and a symbol picker
 - [ ] Unsolved-goals and goals-accomplished markers
 - [ ] Fold and unfold all proofs
-- [ ] Module hierarchy: imports and imported-by
+- [x] Module hierarchy: imports and imported-by (terminal infoview)
 - [ ] Semantic token highlighting on by default for Lean files
 - [x] Prompt to restart a file when its imports are stale (Lean reports it as a diagnostic)
 

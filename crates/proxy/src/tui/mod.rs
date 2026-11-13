@@ -6,6 +6,7 @@ mod hover;
 pub mod lean;
 mod markdown;
 pub mod messages;
+mod modules;
 mod rpc;
 mod screen;
 pub mod theme;

@@ -164,6 +164,7 @@ impl App {
                 .for_each(|(l, hang)| rows.push_hanging(l.clone(), *hang));
             rows.close();
         }
+        self.modules.rows(rows);
     }
 
     /// Messages on the cursor's line, or all of the file's with `a`.

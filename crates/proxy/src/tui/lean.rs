@@ -25,6 +25,11 @@ pub const RPC_CALL: &str = "$/lean/rpc/call";
 pub const RPC_RELEASE: &str = "$/lean/rpc/release";
 pub const HOVER: &str = "textDocument/hover";
 pub const DID_CHANGE_CONFIGURATION: &str = "workspace/didChangeConfiguration";
+/// Lean's module hierarchy: the module of a file, then what it imports and
+/// what imports it.
+pub const PREPARE_MODULE_HIERARCHY: &str = "$/lean/prepareModuleHierarchy";
+pub const MODULE_IMPORTS: &str = "$/lean/moduleHierarchy/imports";
+pub const MODULE_IMPORTED_BY: &str = "$/lean/moduleHierarchy/importedBy";
 
 // Lean's widget RPC methods.
 pub const GET_INTERACTIVE_GOALS: &str = "Lean.Widget.getInteractiveGoals";

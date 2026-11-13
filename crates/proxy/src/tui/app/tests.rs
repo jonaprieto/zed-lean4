@@ -636,10 +636,12 @@ fn keys_move_the_selection_and_the_view_follows() {
     app.on_key(key('j'));
     app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(screen(&app)[0], "F.lean:2:2");
+    // The last row is the folded module section, after a blank line.
     app.on_key(key('G'));
-    assert_eq!(screen(&app)[18], "2:0 error: m29");
+    assert_eq!(screen(&app)[18], "▸ Modules");
     app.on_key(key('k'));
-    assert_eq!(screen(&app)[18], "2:0 error: m29");
+    assert_eq!(screen(&app)[18], "▸ Modules");
+    assert_eq!(screen(&app)[16], "2:0 error: m29");
     app.on_key(key('g'));
     assert_eq!(screen(&app)[0], "F.lean:2:2");
     for quit in [
@@ -663,9 +665,11 @@ fn the_selection_follows_rows_that_shrink() {
     );
     app.on_key(key('G'));
     app.on_message(&json!({"event":"gotServerNotification","args":["textDocument/publishDiagnostics",{"uri":U,"diagnostics":[]}]}));
-    // Rows: file, blank, Messages (0); the selection sits on the last one.
+    // Rows: file, blank, Messages (0), blank, Modules; the selection sits on the last one.
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    shows(&app, &["▸ Messages (0)"]);
+    shows(&app, &["▾ Modules"]);
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.on_key(key('k'));
     app.on_key(key('k'));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     shows(&app, &["▸ Messages (0)"]);
@@ -1027,7 +1031,10 @@ fn the_hover_shows_after_the_messages_and_folds() {
             "Adding zero changes nothing.",
         ],
     );
+    // The last hover row, above the module section.
     app.on_key(key('G'));
+    app.on_key(key('k'));
+    app.on_key(key('k'));
     app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     shows(&app, &["▾ Messages (0)", "", "▸ At the cursor"]);
     hides(&app, "Adding zero changes nothing.");
@@ -1049,4 +1056,72 @@ fn file_label_is_the_last_uri_segment() {
     let deep = json!({"uri":"file:///a/b/Deep.lean","range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}});
     app.reply(lean::HELLO, hello(deep));
     assert_eq!(screen(&app)[0], "Deep.lean:1:0");
+}
+
+#[test]
+fn unfolding_modules_lists_imports_and_importers_that_open_on_click() {
+    let mut app = app();
+    let row_of = |app: &Tui, text: &str| -> u16 {
+        let row = screen(app).iter().position(|l| l.trim_end() == text);
+        row.unwrap_or_else(|| panic!("no {text:?} in {:?}", screen(app)))
+            .try_into()
+            .unwrap()
+    };
+    // Folded by default, so nothing is asked until it opens.
+    shows(&app, &["▸ Modules"]);
+    let row = row_of(&app, "▸ Modules");
+    let module = |uri: &str| json!({"textDocument":{"uri":uri}});
+    assert_eq!(
+        sent(app.on_mouse(click(0, row))),
+        [page_call(
+            lean::SEND_CLIENT_REQUEST,
+            json!([U, lean::PREPARE_MODULE_HIERARCHY, module(U)])
+        )]
+    );
+    let this = json!({"name":"P.F","uri":U});
+    let lists = sent(app.reply(lean::PREPARE_MODULE_HIERARCHY, this.clone()));
+    assert_eq!(
+        lists,
+        [
+            page_call(
+                lean::SEND_CLIENT_REQUEST,
+                json!([U, lean::MODULE_IMPORTS, {"module":this}])
+            ),
+            page_call(
+                lean::SEND_CLIENT_REQUEST,
+                json!([U, lean::MODULE_IMPORTED_BY, {"module":this}])
+            ),
+        ]
+    );
+    let b = "file:///p/B.lean";
+    let kind = json!({"isAll":false,"isPrivate":false,"metaKind":"nonMeta"});
+    app.reply(
+        lean::MODULE_IMPORTS,
+        json!([{"module":{"name":"P.B","uri":b},"kind":kind}]),
+    );
+    app.reply(lean::MODULE_IMPORTED_BY, json!([]));
+    shows(
+        &app,
+        &["▾ Modules", "Imports", "  P.B", "Imported by", "  none"],
+    );
+    // A module opens in Zed.
+    let row = row_of(&app, "  P.B");
+    assert_eq!(
+        sent(app.on_mouse(click(4, row))),
+        [page_call(
+            lean::SHOW_DOCUMENT,
+            json!([{"uri":b,"takeFocus":true}])
+        )]
+    );
+    // While open, the lists follow the shown file.
+    let g = "file:///p/G.lean";
+    let moved = sent(app.on_message(&json!({"event":lean::CHANGED_CURSOR_LOCATION,
+        "args":[{"uri":g,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}}]})));
+    assert!(
+        moved.contains(&page_call(
+            lean::SEND_CLIENT_REQUEST,
+            json!([g, lean::PREPARE_MODULE_HIERARCHY, module(g)])
+        )),
+        "{moved:?}"
+    );
 }
