@@ -18,9 +18,36 @@ lean --version
 
 ## Features
 
+### Recommended settings
+
+Lean answers several requests that Zed leaves off by default, and an extension
+cannot turn them on. Add them for Lean files only:
+
+```json
+"languages": {
+  "Lean 4": {
+    "semantic_tokens": "combined",
+    "inlay_hints": { "enabled": true },
+    "document_folding_ranges": "on",
+    "document_symbols": "on"
+  }
+}
+```
+
+- `semantic_tokens`: Lean's own highlighting on top of tree-sitter's.
+- `inlay_hints`: the implicit arguments Lean binds automatically, such as
+  ` {a b}` after a theorem's name.
+- `document_folding_ranges`: folds each declaration, section and namespace as
+  Lean sees them.
+- `document_symbols`: the outline and breadcrumbs follow Lean's own nesting of
+  namespaces, sections and declarations.
+
+Signature help (`editor: show signature help`), the call hierarchy
+(`call hierarchy: show incoming calls` and `show outgoing calls`) and project
+symbols need no settings.
+
 ### Highlight
 
-- For optimal highlighting, set `"semantic_tokens"` to `"combined"`, which will enable LSP semantic tokens highlight in Zed.
 - With semantic tokens on, the `sorry`, `admit` and `stop` tactics are bold and underlined in the keyword color, from the rules in `languages/lean4/semantic_token_rules.json`. Your own `semantic_token_rules` for `leanSorryLike` take precedence.
 
 ### Goal in hover
@@ -183,7 +210,6 @@ The extension runs `lake serve` behind `lean4-ide-proxy`. It looks for the proxy
 
 ```json
 {
-  "semantic_tokens": "combined",
   "lsp": {
     "lean4-ide": {
       "binary": {
