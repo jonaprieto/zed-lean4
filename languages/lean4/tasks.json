@@ -10,5 +10,33 @@
     "show_summary": false,
     "show_command": false,
     "tags": ["lean-infoview"]
+  },
+  {
+    "label": "Lean: lake build",
+    "command": "lake",
+    "args": ["build"],
+    "allow_concurrent_runs": false,
+    "reveal": "no_focus"
+  },
+  {
+    "label": "Lean: lake update",
+    "command": "lake",
+    "args": ["update"],
+    "allow_concurrent_runs": false,
+    "reveal": "no_focus"
+  },
+  {
+    "label": "Lean: lake clean",
+    "command": "lake",
+    "args": ["clean"],
+    "allow_concurrent_runs": false,
+    "reveal": "no_focus"
+  },
+  {
+    "label": "Lean: fetch the Mathlib cache",
+    "command": "lake",
+    "args": ["exe", "cache", "get"],
+    "allow_concurrent_runs": false,
+    "reveal": "no_focus"
   }
 ]

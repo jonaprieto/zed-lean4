@@ -187,6 +187,12 @@ first line says so and `r` restarts the file, and the browser infoview's own
 Restart File button works too. Restarting sends Lean the text Zed has, saved
 or not.
 
+### Lake tasks
+
+With a Lean file open, `task: spawn` offers `lake build`, `lake update`,
+`lake clean` and "fetch the Mathlib cache" (`lake exe cache get`). They run
+in the worktree root with the `lake` on your `PATH`.
+
 ### Abbreviation
 
 - Type a Lean abbreviation such as `\alpha` or `\to` and accept the completion
@@ -272,8 +278,8 @@ window. Items marked (proxy) depend on it.
 
 - [ ] Update and uninstall _elan_
 - [ ] Select the default and per-project toolchain
-- [ ] Lake commands: build, clean, update dependency
-- [ ] Fetch the Mathlib cache (`lake exe cache get`)
+- [x] Lake commands: build, clean, update dependency (Zed tasks)
+- [x] Fetch the Mathlib cache (`lake exe cache get`)
 - [ ] New standalone or Mathlib project
 - [ ] Setup diagnostics with actionable errors (missing elan or lake, unsupported Lean version)
 
