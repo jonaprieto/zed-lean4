@@ -793,9 +793,9 @@ fn clicking_a_subterm_shows_its_type_and_goes_to_its_definition() {
     assert_eq!(footer(&app), PICKED_KEYS);
     app.reply(
         lean::INFO_TO_INTERACTIVE,
-        json!({"type":{"text":"Nat → Nat"},"doc":"The successor."}),
+        json!({"type":{"text":"Nat → Nat"},"doc":"The successor,\n`n + 1`."}),
     );
-    shows(&app, &["Nat.succ : Nat → Nat", "The successor."]);
+    shows(&app, &["Nat.succ : Nat → Nat", "The successor, n + 1."]);
     assert_eq!(
         sent(app.on_key(key('d'))),
         [rpc_call(

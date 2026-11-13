@@ -4,6 +4,7 @@ mod detail;
 pub mod goals;
 mod hover;
 pub mod lean;
+mod markdown;
 pub mod messages;
 mod rpc;
 mod screen;

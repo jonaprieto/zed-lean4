@@ -3,15 +3,14 @@ use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 use serde_json::Value;
 
 use super::{
-    goals,
+    goals, markdown,
     rpc::{Held, Session},
-    theme,
-    view::Text,
+    view::{HANG, Text, wrap},
 };
 
 /// Screen lines the panel takes at most, its top border included.
@@ -32,8 +31,8 @@ impl Picked {
         Held::new(Some(self.session), self.popup)
     }
 
-    /// The subterm, its type and its docstring.
-    pub(super) fn lines(&self) -> Vec<Line<'static>> {
+    /// The subterm, its type and its docstring, wrapped to `width` columns.
+    pub(super) fn lines(&self, width: u16) -> Vec<Line<'static>> {
         let popup = self.popup.as_ref();
         let expr = popup.map(|p| &p["exprExplicit"]).filter(|e| !e.is_null());
         let mut head = match expr {
@@ -46,7 +45,7 @@ impl Picked {
             }
             None => Line::raw(self.label.clone()),
         };
-        let mut lines: Vec<Line> = match popup.map(|p| &p["type"]).filter(|t| !t.is_null()) {
+        let lines: Vec<Line> = match popup.map(|p| &p["type"]).filter(|t| !t.is_null()) {
             Some(ty) => {
                 head.spans.push(Span::raw(" : "));
                 goals::typeset(head.into(), ty, &[])
@@ -56,11 +55,14 @@ impl Picked {
             }
             None => vec![head],
         };
-        if let Some(doc) = popup.and_then(|p| p["doc"].as_str()) {
-            let docs = theme::current().docs;
-            lines.extend(doc.lines().map(|l| Line::styled(l.to_owned(), docs)));
-        }
+        let doc = popup.and_then(|p| p["doc"].as_str()).unwrap_or_default();
         lines
+            .into_iter()
+            .map(|line| (line, HANG))
+            .chain(markdown::lines(doc))
+            .flat_map(|(line, hang)| wrap(line, width.into(), hang))
+            .map(|(line, ..)| line)
+            .collect()
     }
 }
 
@@ -80,8 +82,6 @@ pub(super) fn render(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
     if lines.is_empty() {
         return;
     }
-    let panel = Paragraph::new(lines)
-        .block(Block::new().borders(Borders::TOP))
-        .wrap(Wrap { trim: false });
+    let panel = Paragraph::new(lines).block(Block::new().borders(Borders::TOP));
     frame.render_widget(panel, area);
 }

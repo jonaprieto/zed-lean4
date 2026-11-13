@@ -11,8 +11,7 @@ use serde_json::Value;
 
 use super::App;
 use crate::tui::{
-    detail::{self, Picked},
-    lean, messages,
+    detail, lean, messages,
     screen::{Screen, Wrapped},
     theme,
     view::{Row, Rows},
@@ -23,7 +22,8 @@ pub(super) const PICKED_KEYS: &str = "d definition  t type  esc close";
 
 impl App {
     pub fn render(&self, frame: &mut Frame) {
-        let detail = self.picked.as_ref().map_or(vec![], Picked::lines);
+        let width = frame.area().width;
+        let detail = self.picked.as_ref().map_or(vec![], |p| p.lines(width));
         let [body, panel, footer] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(detail::height(&detail)),

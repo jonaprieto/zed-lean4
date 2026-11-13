@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::{
     detail::Picked,
-    goals, hover, lean,
+    goals, hover, lean, markdown,
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
     settings,
@@ -116,7 +116,7 @@ pub struct App {
     goal_texts: Vec<Vec<Text>>,
     term_texts: Vec<Text>,
     /// Lean's hover at the shown location: signature and docstring.
-    hover: Option<Vec<hover::HoverLine>>,
+    hover: Option<Vec<markdown::Hanging>>,
     cache: Cache,
     /// Interactive diagnostics on the shown line.
     messages: Option<Held>,

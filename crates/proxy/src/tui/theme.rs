@@ -55,6 +55,8 @@ roles! {
     heading: Style::new().add_modifier(Modifier::BOLD),
     /// Docstrings and other prose.
     docs: Style::new().add_modifier(Modifier::DIM),
+    /// Link text in docstrings; the URL is not shown.
+    link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
     error: Style::new().fg(Color::Red),
     warning: Style::new().fg(Color::Yellow),
     information: Style::new().fg(Color::Blue),

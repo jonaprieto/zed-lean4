@@ -131,9 +131,8 @@ and pick up changes without a restart:
   `dim`, `italic`, `underlined`, `reversed`, `crossed_out`; a list replaces the
   role's own). Roles: `hypothesis`, `goal_prefix`, `inaccessible`, `case_name`,
   `inserted`, `removed`, `keyword`, `literal`, `trace_class`, `selection`,
-  `heading`, `docs`, `error`, `warning`, `information`, `hint`, `checked`,
-  `checking`. Unknown roles
-  and colors show in the view's footer.
+  `heading`, `docs`, `link`, `error`, `warning`, `information`, `hint`,
+  `checked`, `checking`. Unknown roles and colors show in the view's footer.
 
 ### Abbreviation
 
