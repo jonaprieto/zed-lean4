@@ -1,7 +1,11 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
-use crate::{bridge, cursor, hover, init, msg, settings};
+use crate::{
+    bridge, commands, cursor,
+    documents::{self, Documents},
+    hover, init, msg, settings,
+};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub const KEEPALIVE: Duration = Duration::from_secs(10);
@@ -12,6 +16,14 @@ const LEAN_METHODS: &str = "$/lean/";
 const PAGE_LSP_REQUESTS: &[&str] = &["textDocument/hover"];
 /// How Zed hands over `lsp.lean4-ide.settings`, on start and on every change.
 const DID_CHANGE_CONFIGURATION: &str = "workspace/didChangeConfiguration";
+const PUBLISH_DIAGNOSTICS: &str = "textDocument/publishDiagnostics";
+const FILE_PROGRESS: &str = "$/lean/fileProgress";
+const CODE_ACTION: &str = "textDocument/codeAction";
+const EXECUTE_COMMAND: &str = "workspace/executeCommand";
+/// JSON-RPC `InvalidParams`, for a restart of a file Lean does not have open.
+const NOT_OPEN: i64 = -32602;
+/// The code action kind of a quick fix.
+const QUICKFIX: &str = "quickfix";
 
 fn page_may_request(method: &str) -> bool {
     method.starts_with(LEAN_METHODS) || PAGE_LSP_REQUESTS.contains(&method)
@@ -50,7 +62,9 @@ pub enum Action {
 pub struct Router {
     next_id: u64,
     page_url: Option<String>,
-    code_actions: HashSet<String>,
+    /// Client code action request id key -> the actions to add to Lean's.
+    code_actions: HashMap<String, CodeActions>,
+    documents: Documents,
     sessions: HashMap<String, Session>,
     location: Option<Value>,
     initialize_id: Option<String>,
@@ -80,6 +94,13 @@ enum Pending {
         connection: u64,
     },
     Goal(String),
+}
+
+/// What a code action request may get besides Lean's own actions.
+struct CodeActions {
+    uri: String,
+    open_infoview: bool,
+    restart_file: bool,
 }
 
 struct Session {
@@ -145,16 +166,14 @@ impl Router {
             if method == DID_CHANGE_CONFIGURATION {
                 self.infoview = m["params"]["settings"][settings::INFOVIEW].clone();
             }
-            if method == "textDocument/didClose"
+            self.documents.observe(&m);
+            if method == documents::DID_CLOSE
                 && let Some(uri) = m["params"]["textDocument"]["uri"].as_str()
             {
-                self.sessions.retain(|_, session| session.uri != uri);
-                for values in self.latest.values_mut() {
-                    values.remove(uri);
-                }
+                self.forget(uri);
             }
             let copy = bridge::event("sentClientNotification", json!([method, m["params"]]));
-            let closed = method == "textDocument/didClose"
+            let closed = method == documents::DID_CLOSE
                 && self
                     .location
                     .as_ref()
@@ -174,32 +193,40 @@ impl Router {
     }
 
     fn client_message(&mut self, m: Value) -> Vec<Action> {
-        if msg::is_request(&m)
+        if msg::method(&m) == Some(CODE_ACTION) {
+            self.expect_code_actions(&m);
+        }
+        if msg::method(&m) == Some(EXECUTE_COMMAND)
+            && m["params"]["command"] == commands::RESTART_FILE
+        {
+            let uri = m["params"]["arguments"][0].as_str().unwrap_or_default();
+            return match self.restart(uri) {
+                Ok(mut out) => {
+                    out.push(Action::ToClient(msg::response(&m["id"], Value::Null)));
+                    out
+                }
+                Err(error) => vec![Action::ToClient(msg::error_response(
+                    &m["id"], NOT_OPEN, &error,
+                ))],
+            };
+        }
+        if msg::method(&m) == Some(EXECUTE_COMMAND)
+            && m["params"]["command"] == commands::OPEN_INFOVIEW
             && let Some(url) = &self.page_url
         {
-            if msg::method(&m) == Some("textDocument/codeAction")
-                && m["params"]["context"].get("only").is_none()
-                && settings::opens_browser(&self.infoview)
-            {
-                self.code_actions.insert(msg::id_key(&m["id"]));
-            }
-            if msg::method(&m) == Some("workspace/executeCommand")
-                && m["params"]["command"] == init::OPEN_COMMAND
-            {
-                let params = json!({"uri":url,"external":true});
-                let id = self.proxy_id();
-                self.pending.insert(
-                    id.clone(),
-                    Pending::Open {
-                        id: m["id"].clone(),
-                    },
-                );
-                return vec![Action::ToClient(msg::request(
-                    &id,
-                    "window/showDocument",
-                    params,
-                ))];
-            }
+            let params = json!({"uri":url,"external":true});
+            let id = self.proxy_id();
+            self.pending.insert(
+                id.clone(),
+                Pending::Open {
+                    id: m["id"].clone(),
+                },
+            );
+            return vec![Action::ToClient(msg::request(
+                &id,
+                "window/showDocument",
+                params,
+            ))];
         }
         if let Some(own) = msg::proxy_response_id(&m) {
             if matches!(self.pending.get(own), Some(Pending::Open { .. }))
@@ -254,20 +281,19 @@ impl Router {
     fn on_server(&mut self, mut m: Value) -> Vec<Action> {
         if msg::is_response(&m) && self.initialize_id.as_ref() == Some(&msg::id_key(&m["id"])) {
             self.initialize_id = None;
-            if self.page_url.is_some()
-                && let Some(result) = m.get_mut("result")
-            {
-                init::advertise_command(result);
+            if let Some(result) = m.get_mut("result") {
+                commands::advertise(result, &[commands::RESTART_FILE]);
+                if self.page_url.is_some() {
+                    commands::advertise(result, &[commands::OPEN_INFOVIEW]);
+                }
             }
             self.initialize_result = m.get("result").filter(|v| v.is_object()).cloned();
         }
         if !msg::is_request(&m)
             && let Some(method) = msg::method(&m)
         {
-            if matches!(
-                method,
-                "textDocument/publishDiagnostics" | "$/lean/fileProgress"
-            ) && let Some(uri) = notification_uri(&m["params"])
+            if matches!(method, PUBLISH_DIAGNOSTICS | FILE_PROGRESS)
+                && let Some(uri) = notification_uri(&m["params"])
             {
                 self.latest
                     .entry(method.into())
@@ -325,8 +351,9 @@ impl Router {
             };
         }
         let key = msg::id_key(&m["id"]);
-        if self.code_actions.remove(&key) {
-            return vec![Action::ToClient(init::add_open_action(m))];
+        if let Some(wanted) = self.code_actions.remove(&key) {
+            let actions = self.added_actions(&wanted);
+            return vec![Action::ToClient(commands::add_actions(m, actions))];
         }
         match self.hovers.get_mut(&key) {
             Some(_) if m.get("error").is_some() => {
@@ -384,8 +411,17 @@ impl Router {
                 self.request_client(call.id, "window/showDocument", params)
             }
             ("restartFile", [uri]) if uri.is_string() => {
-                tracing::info!("restartFile is not implemented yet");
-                vec![Action::ToBrowser(bridge::reply(&call.id, Value::Null))]
+                match self.restart(uri.as_str().unwrap()) {
+                    Ok(mut out) => {
+                        out.push(Action::ToBrowser(bridge::reply(&call.id, Value::Null)));
+                        out
+                    }
+                    Err(error) => {
+                        vec![Action::ToBrowser(bridge::reply_error(
+                            &call.id, NOT_OPEN, &error,
+                        ))]
+                    }
+                }
             }
             ("createRpcSession", [uri]) if uri.is_string() => {
                 let id = self.proxy_id();
@@ -446,6 +482,75 @@ impl Router {
                 -32601,
                 "unsupported or malformed page call",
             ))],
+        }
+    }
+
+    /// Notes what to add to the answer of a code action request: the quick
+    /// fix for stale imports unless the request asks for other kinds only,
+    /// and the browser infoview when the settings pick it.
+    fn expect_code_actions(&mut self, m: &Value) {
+        let Some(uri) = m["params"]["textDocument"]["uri"].as_str() else {
+            return;
+        };
+        let only = m["params"]["context"]["only"].as_array();
+        let wanted = CodeActions {
+            uri: uri.to_owned(),
+            open_infoview: only.is_none()
+                && self.page_url.is_some()
+                && settings::opens_browser(&self.infoview),
+            restart_file: only.is_none_or(|kinds| kinds.iter().any(|k| k == QUICKFIX)),
+        };
+        if wanted.open_infoview || wanted.restart_file {
+            self.code_actions.insert(msg::id_key(&m["id"]), wanted);
+        }
+    }
+
+    fn added_actions(&self, wanted: &CodeActions) -> Vec<Value> {
+        let mut actions = Vec::new();
+        if wanted.restart_file {
+            let stale: Vec<Value> = self
+                .latest
+                .get(PUBLISH_DIAGNOSTICS)
+                .and_then(|files| files.get(&wanted.uri))
+                .and_then(|params| params["diagnostics"].as_array())
+                .into_iter()
+                .flatten()
+                .filter(|d| commands::imports_out_of_date(d))
+                .cloned()
+                .collect();
+            if !stale.is_empty() {
+                actions.push(commands::restart_file(&wanted.uri, stale));
+            }
+        }
+        if wanted.open_infoview {
+            actions.push(commands::open_infoview());
+        }
+        actions
+    }
+
+    /// Makes Lean start `uri` over from the text Zed has, as Lean's "Restart
+    /// File" asks after the file's imports changed. Infoviews see the close and
+    /// open like any other.
+    fn restart(&mut self, uri: &str) -> Result<Vec<Action>, String> {
+        let Some(reopen) = self.documents.reopen(uri) else {
+            return Err(format!("Lean does not have {uri} open"));
+        };
+        self.forget(uri);
+        let mut out: Vec<Action> = reopen.iter().cloned().map(Action::ToServer).collect();
+        out.extend(reopen.iter().map(|m| {
+            Action::ToBrowser(bridge::event(
+                "sentClientNotification",
+                json!([m["method"], m["params"]]),
+            ))
+        }));
+        Ok(out)
+    }
+
+    /// Drops what the router keeps about `uri` once Lean closed it.
+    fn forget(&mut self, uri: &str) {
+        self.sessions.retain(|_, session| session.uri != uri);
+        for values in self.latest.values_mut() {
+            values.remove(uri);
         }
     }
 
@@ -894,12 +999,10 @@ mod cursor_tests {
         r.handle(Event::FromClient(
             json!({"id":1,"method":"initialize","params":{}}),
         ));
-        let result = json!({"capabilities":{"experimental":{"rpcProvider":{"rpcWireFormat":"v1"}}},"serverInfo":{"version":"4.33.1"}});
-        let response = json!({"id":1,"result":result});
-        assert_eq!(
-            r.handle(Event::FromServer(response.clone())),
-            vec![Action::ToClient(response)]
-        );
+        let mut result = json!({"capabilities":{"experimental":{"rpcProvider":{"rpcWireFormat":"v1"}}},"serverInfo":{"version":"4.33.1"}});
+        let out = r.handle(Event::FromServer(json!({"id":1,"result":result})));
+        commands::advertise(&mut result, &[commands::RESTART_FILE]);
+        assert_eq!(out, vec![Action::ToClient(json!({"id":1,"result":result}))]);
         let m = json!({"id":2,"method":"textDocument/documentHighlight","params":{"textDocument":{"uri":"file:///F.lean"},"position":{"line":1,"character":2}}});
         let loc = json!({"uri":"file:///F.lean","range":{"start":{"line":1,"character":2},"end":{"line":1,"character":2}}});
         assert_eq!(
@@ -1076,13 +1179,6 @@ mod edit_tests {
             vec![Action::ToBrowser(json!({"id":"a:2","error":error}))]
         );
         assert!(r.pending.is_empty());
-        assert_eq!(
-            r.handle(Event::FromBrowser(
-                1,
-                json!({"id":"a:3","call":"restartFile","args":["file:///F.lean"]})
-            )),
-            vec![Action::ToBrowser(bridge::reply("a:3", Value::Null))]
-        );
     }
 }
 
@@ -1103,10 +1199,10 @@ mod open_tests {
         };
         assert_eq!(
             init["result"]["capabilities"]["executeCommandProvider"]["commands"],
-            json!(["existing", init::OPEN_COMMAND])
+            json!(["existing", commands::RESTART_FILE, commands::OPEN_INFOVIEW])
         );
         // The terminal infoview is the default, so the browser action stays out.
-        let request = json!({"id":2,"method":"textDocument/codeAction","params":{"context":{}}});
+        let request = json!({"id":2,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///F.lean"},"context":{}}});
         r.handle(Event::FromClient(request));
         let response = json!({"id":2,"result":null});
         assert_eq!(
@@ -1116,8 +1212,7 @@ mod open_tests {
         r.handle(Event::FromClient(json!({"method":DID_CHANGE_CONFIGURATION,
             "params":{"settings":{"infoview":{"open":"browser"}}}})));
         for only in [false, true] {
-            let mut request =
-                json!({"id":2,"method":"textDocument/codeAction","params":{"context":{}}});
+            let mut request = json!({"id":2,"method":"textDocument/codeAction","params":{"textDocument":{"uri":"file:///F.lean"},"context":{}}});
             if only {
                 request["params"]["context"]["only"] = json!([]);
             }
@@ -1130,11 +1225,14 @@ mod open_tests {
             if only {
                 assert_eq!(*m, response);
             } else {
-                assert_eq!(m["result"][0]["command"]["command"], init::OPEN_COMMAND);
+                assert_eq!(
+                    m["result"][0]["command"]["command"],
+                    commands::OPEN_INFOVIEW
+                );
                 assert!(m["result"][0].get("data").is_none());
             }
         }
-        let out=r.handle(Event::FromClient(json!({"id":3,"method":"workspace/executeCommand","params":{"command":init::OPEN_COMMAND}})));
+        let out=r.handle(Event::FromClient(json!({"id":3,"method":"workspace/executeCommand","params":{"command":commands::OPEN_INFOVIEW}})));
         assert_eq!(
             out,
             vec![Action::ToClient(msg::request(
@@ -1152,5 +1250,123 @@ mod open_tests {
             )]
         );
         assert!(r.pending.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    use crate::documents::{DID_CLOSE, DID_OPEN};
+
+    const F: &str = "file:///p/F.lean";
+
+    fn stale() -> Value {
+        json!({"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}},
+            "severity":1,"message":"Imports are out of date and should be rebuilt; use the \"Restart File\" command in your editor."})
+    }
+
+    /// A router that saw `F` open with `text` and Lean report its imports stale.
+    fn stale_router(text: &str) -> Router {
+        let mut r = Router::new(None);
+        r.handle(Event::FromClient(
+            json!({"id":1,"method":"initialize","params":{}}),
+        ));
+        let out = r.handle(Event::FromServer(
+            json!({"id":1,"result":{"capabilities":{}}}),
+        ));
+        let Action::ToClient(init) = &out[0] else {
+            panic!("initialize")
+        };
+        assert_eq!(
+            init["result"]["capabilities"]["executeCommandProvider"]["commands"],
+            json!([commands::RESTART_FILE]),
+            "restarting needs no browser page"
+        );
+        r.handle(Event::FromClient(msg::notification(
+            DID_OPEN,
+            json!({"textDocument":{"uri":F,"languageId":"lean4","version":3,"text":text}}),
+        )));
+        r.handle(Event::FromServer(msg::notification(
+            PUBLISH_DIAGNOSTICS,
+            json!({"uri":F,"diagnostics":[stale()]}),
+        )));
+        r
+    }
+
+    fn code_actions(r: &mut Router, context: Value) -> Value {
+        r.handle(Event::FromClient(json!({"id":7,"method":CODE_ACTION,
+            "params":{"textDocument":{"uri":F},"context":context}})));
+        let out = r.handle(Event::FromServer(json!({"id":7,"result":null})));
+        let [Action::ToClient(m)] = out.as_slice() else {
+            panic!("code actions: {out:?}")
+        };
+        m["result"].clone()
+    }
+
+    /// What Lean gets to start `F` over: a close, then an open of `text`.
+    fn reopened(text: &str) -> [Action; 2] {
+        [
+            Action::ToServer(msg::notification(
+                DID_CLOSE,
+                json!({"textDocument":{"uri":F}}),
+            )),
+            Action::ToServer(msg::notification(
+                DID_OPEN,
+                json!({"textDocument":{"uri":F,"languageId":"lean4","version":3,"text":text}}),
+            )),
+        ]
+    }
+
+    #[test]
+    fn stale_imports_offer_a_quick_fix_that_reopens_the_file() {
+        let mut r = stale_router("import A\n");
+        assert_eq!(
+            code_actions(&mut r, json!({})),
+            json!([commands::restart_file(F, vec![stale()])])
+        );
+        assert_eq!(
+            code_actions(&mut r, json!({"only":["source.organizeImports"]})),
+            Value::Null,
+            "a request for other kinds gets no quick fix"
+        );
+        let out = r.handle(Event::FromClient(json!({"id":8,"method":EXECUTE_COMMAND,
+            "params":{"command":commands::RESTART_FILE,"arguments":[F]}})));
+        assert_eq!(out[..2], reopened("import A\n"));
+        assert_eq!(
+            out.last(),
+            Some(&Action::ToClient(
+                json!({"jsonrpc":"2.0","id":8,"result":null})
+            ))
+        );
+        assert_eq!(
+            code_actions(&mut r, json!({})),
+            Value::Null,
+            "the stale diagnostic went with the old file"
+        );
+    }
+
+    #[test]
+    fn infoviews_restart_the_file_and_unknown_files_are_an_error() {
+        let mut r = stale_router("import A\n");
+        let call = |id: &str, uri: &str| {
+            Event::FromBrowser(1, json!({"id":id,"call":"restartFile","args":[uri]}))
+        };
+        let out = r.handle(call("p:1", F));
+        assert_eq!(out[..2], reopened("import A\n"));
+        assert_eq!(
+            out.last(),
+            Some(&Action::ToBrowser(bridge::reply("p:1", Value::Null)))
+        );
+        let out = r.handle(call("p:2", "file:///p/Closed.lean"));
+        assert!(
+            matches!(out.as_slice(), [Action::ToBrowser(v)] if v["error"]["code"] == NOT_OPEN),
+            "{out:?}"
+        );
+        let out = r.handle(Event::FromClient(json!({"id":9,"method":EXECUTE_COMMAND,
+            "params":{"command":commands::RESTART_FILE,"arguments":["file:///p/Closed.lean"]}})));
+        assert!(
+            matches!(out.as_slice(), [Action::ToClient(v)] if v["error"]["code"] == NOT_OPEN),
+            "{out:?}"
+        );
     }
 }

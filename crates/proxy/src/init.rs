@@ -1,12 +1,5 @@
-use crate::msg;
-use serde_json::{Map, Value, json};
-
-fn object(value: &mut Value) -> Option<&mut Map<String, Value>> {
-    if value.is_null() {
-        *value = json!({});
-    }
-    value.as_object_mut()
-}
+use crate::msg::{self, object};
+use serde_json::{Value, json};
 
 pub fn rewrite_request(mut m: Value) -> Value {
     if !msg::is_request(&m) || msg::method(&m) != Some("initialize") {
@@ -31,40 +24,6 @@ pub fn rewrite_request(mut m: Value) -> Value {
     opts.insert("hasWidgets".into(), json!(true));
     m["params"] = params;
     m
-}
-
-pub const OPEN_COMMAND: &str = "lean4-ide.openInfoview";
-
-pub fn advertise_command(result: &mut Value) {
-    let Some(result) = object(result) else { return };
-    let Some(caps) = object(result.entry("capabilities").or_insert(Value::Null)) else {
-        return;
-    };
-    let Some(provider) = object(caps.entry("executeCommandProvider").or_insert(Value::Null)) else {
-        return;
-    };
-    let commands = provider.entry("commands").or_insert_with(|| json!([]));
-    if let Some(commands) = commands.as_array_mut()
-        && !commands.iter().any(|v| v == OPEN_COMMAND)
-    {
-        commands.push(json!(OPEN_COMMAND));
-    }
-}
-
-pub fn add_open_action(mut response: Value) -> Value {
-    if response.get("error").is_some() {
-        return response;
-    }
-    if let Some(result) = response.get_mut("result") {
-        if result.is_null() {
-            *result = json!([]);
-        }
-        if let Some(actions) = result.as_array_mut() {
-            actions.push(json!({"title":"Open Lean Infoview","command":{
-                "title":"Open Lean Infoview","command":OPEN_COMMAND}}));
-        }
-    }
-    response
 }
 
 #[cfg(test)]

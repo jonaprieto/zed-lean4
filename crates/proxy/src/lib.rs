@@ -1,7 +1,9 @@
 pub mod bridge;
 pub mod codec;
+pub mod commands;
 pub mod cursor;
 pub mod discover;
+pub mod documents;
 pub mod hover;
 pub mod init;
 pub mod msg;

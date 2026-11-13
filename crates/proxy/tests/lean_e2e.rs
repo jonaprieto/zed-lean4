@@ -173,6 +173,35 @@ async fn plain_goal_passes_through() {
 
 #[tokio::test]
 #[ignore = "needs elan and Lean v4.33.1"]
+async fn restart_file_reopens_the_edited_text_in_lean() {
+    let mut lsp = Lsp::start().await;
+    let doc = json!({"uri": fixture_uri(), "version": 2});
+    // A comment above the theorem moves its proof from line 1 to line 2.
+    let top = json!({"start":{"line":0,"character":0},"end":{"line":0,"character":0}});
+    lsp.notify(
+        "textDocument/didChange",
+        json!({"textDocument": doc, "contentChanges": [{"range": top, "text": "-- edited\n"}]}),
+    )
+    .await;
+    let restart = lsp
+        .request(
+            "workspace/executeCommand",
+            json!({"command": "lean4-ide.restartFile", "arguments": [fixture_uri()]}),
+        )
+        .await;
+    assert_eq!(restart.get("error"), None, "{restart}");
+    let pos =
+        json!({"textDocument": {"uri": fixture_uri()}, "position": {"line": 2, "character": 2}});
+    let resp = lsp.request("$/lean/plainGoal", pos).await;
+    assert_eq!(
+        resp["result"]["goals"],
+        json!(["n : Nat\n⊢ n + 0 = n"]),
+        "{resp}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs elan and Lean v4.33.1"]
 async fn hover_shows_goal_on_tactic() {
     let mut lsp = Lsp::start().await;
     let pos =
