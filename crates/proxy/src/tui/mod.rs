@@ -8,7 +8,6 @@ mod markdown;
 pub mod messages;
 mod rpc;
 mod screen;
-mod settings;
 pub mod theme;
 pub mod view;
 

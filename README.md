@@ -28,8 +28,9 @@ Hovering inside a tactic proof shows the goal state below the usual hover text. 
 
 ### Browser infoview
 
-In a Lean file, choose Open Lean Infoview from Zed's code actions. The official
-Lean infoview opens in your browser, follows the Zed cursor and shows the goals
+Press `o` in the terminal infoview, or set `infoview.open` to `"browser"` (see
+Infoview settings) and choose Open Lean Infoview from Zed's code actions. The
+official Lean infoview opens in your browser, follows the Zed cursor and shows the goals
 and messages there. Edits and locations the infoview asks for (copy to comment,
 suggestions, go to definition) are sent back to Zed; see the TODO list below for
 what has been checked so far.
@@ -57,6 +58,19 @@ which the proxy points at itself whenever it starts, so nothing needs to be on
 your `PATH` and the view always matches the running proxy. To put it
 beside the code instead of at the bottom, set `"terminal": {"dock": "right"}` in
 your Zed settings.
+
+Extensions cannot ship keybindings, so to open it from the keyboard add one to
+your Zed keymap (`zed: open keymap`); in Lean files it takes over whatever the
+key did before:
+
+```json
+{
+  "context": "Editor && extension == lean",
+  "bindings": {
+    "ctrl-shift-i": ["task::Spawn", {"task_name": "Lean: terminal infoview"}]
+  }
+}
+```
 
 The terminal infoview is a second client of the same socket the browser page
 uses. It finds the running proxy through a discovery file in
@@ -120,9 +134,11 @@ and pick up changes without a restart:
 }
 ```
 
-- `open`: what the gutter run button opens, `"terminal"` (the default) or
-  `"browser"`. With `"browser"` the task opens the browser infoview and exits;
-  the Open Lean Infoview code action always opens the browser.
+- `open`: which infoview to use, `"terminal"` (the default) or `"browser"`.
+  With `"browser"` the run button opens the browser infoview and exits, and
+  the code actions offer Open Lean Infoview. With `"terminal"` that action
+  stays out of the menu, since a language server cannot start a Zed task; use
+  the run button or the keybinding above.
 - `theme`: colors of the terminal infoview, role by role. By default it uses
   the terminal's named colors, which Zed's terminal takes from your editor
   theme, so most themes need nothing here. A role takes a color (a name such

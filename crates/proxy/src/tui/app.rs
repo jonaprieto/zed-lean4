@@ -9,12 +9,13 @@ use ratatui::crossterm::event::{
 };
 use serde_json::{Value, json};
 
+use crate::settings;
+
 use super::{
     detail::Picked,
     goals, hover, lean, markdown,
     rpc::{Held, Rpc, Session},
     screen::{Cache, Screen},
-    settings,
     theme::{self, Theme},
     view::{self, Text},
 };

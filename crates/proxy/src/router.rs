@@ -1,5 +1,5 @@
 //! All routing decisions. No I/O: feed events in, get actions out.
-use crate::{bridge, cursor, hover, init, msg};
+use crate::{bridge, cursor, hover, init, msg, settings};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -12,8 +12,6 @@ const LEAN_METHODS: &str = "$/lean/";
 const PAGE_LSP_REQUESTS: &[&str] = &["textDocument/hover"];
 /// How Zed hands over `lsp.lean4-ide.settings`, on start and on every change.
 const DID_CHANGE_CONFIGURATION: &str = "workspace/didChangeConfiguration";
-/// The part of those settings that is meant for infoview clients.
-const INFOVIEW_SETTINGS: &str = "infoview";
 
 fn page_may_request(method: &str) -> bool {
     method.starts_with(LEAN_METHODS) || PAGE_LSP_REQUESTS.contains(&method)
@@ -145,7 +143,7 @@ impl Router {
             && let Some(method) = msg::method(&m)
         {
             if method == DID_CHANGE_CONFIGURATION {
-                self.infoview = m["params"]["settings"][INFOVIEW_SETTINGS].clone();
+                self.infoview = m["params"]["settings"][settings::INFOVIEW].clone();
             }
             if method == "textDocument/didClose"
                 && let Some(uri) = m["params"]["textDocument"]["uri"].as_str()
@@ -181,6 +179,7 @@ impl Router {
         {
             if msg::method(&m) == Some("textDocument/codeAction")
                 && m["params"]["context"].get("only").is_none()
+                && settings::opens_browser(&self.infoview)
             {
                 self.code_actions.insert(msg::id_key(&m["id"]));
             }
@@ -1092,7 +1091,7 @@ mod open_tests {
     use super::*;
 
     #[test]
-    fn advertises_injects_skips_save_and_opens_through_zed() {
+    fn advertises_injects_when_settings_pick_the_browser_and_opens_through_zed() {
         let url = "http://127.0.0.1:1234/?token=abc";
         let mut r = Router::new(Some(url.into()));
         r.handle(Event::FromClient(
@@ -1106,6 +1105,16 @@ mod open_tests {
             init["result"]["capabilities"]["executeCommandProvider"]["commands"],
             json!(["existing", init::OPEN_COMMAND])
         );
+        // The terminal infoview is the default, so the browser action stays out.
+        let request = json!({"id":2,"method":"textDocument/codeAction","params":{"context":{}}});
+        r.handle(Event::FromClient(request));
+        let response = json!({"id":2,"result":null});
+        assert_eq!(
+            r.handle(Event::FromServer(response.clone())),
+            vec![Action::ToClient(response)]
+        );
+        r.handle(Event::FromClient(json!({"method":DID_CHANGE_CONFIGURATION,
+            "params":{"settings":{"infoview":{"open":"browser"}}}})));
         for only in [false, true] {
             let mut request =
                 json!({"id":2,"method":"textDocument/codeAction","params":{"context":{}}});
