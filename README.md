@@ -84,8 +84,10 @@ The editor keeps focus, and the view follows the cursor from then on; you only
 open it once per session. The task runs `~/.cache/lean4-ide/bin/lean4-ide-proxy`,
 which the proxy points at itself whenever it starts, so nothing needs to be on
 your `PATH` and the view always matches the running proxy. To put it
-beside the code instead of at the bottom, set `"terminal": {"dock": "right"}` in
-your Zed settings.
+beside the code instead of at the bottom, set `"terminal": {"dock": "right",
+"default_width": 450}` in your Zed settings. Zed measures the width in pixels,
+so adjust it to your font; 450 gives roughly 50 columns at a 15px font. The view
+wraps to any width.
 
 Extensions cannot ship keybindings, so to open it from the keyboard add one to
 your Zed keymap (`zed: open keymap`); in Lean files it takes over whatever the
@@ -98,6 +100,18 @@ key did before:
     "ctrl-shift-i": ["task::Spawn", {"task_name": "Lean: terminal infoview"}]
   }
 }
+```
+
+To open it as an editor pane to the right of the code instead of in a dock,
+split first and spawn the task into the center. Zed then focuses the
+infoview; move back to the code with `workspace::ActivatePaneLeft`
+(`ctrl-w h` in vim mode).
+
+```json
+"ctrl-shift-i": ["action::Sequence", [
+  "pane::SplitRight",
+  ["task::Spawn", {"task_name": "Lean: terminal infoview", "reveal_target": "center"}]
+]]
 ```
 
 The terminal infoview is a second client of the same socket the browser page
