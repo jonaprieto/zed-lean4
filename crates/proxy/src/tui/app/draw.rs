@@ -160,9 +160,11 @@ impl App {
         self.build_messages(rows, uri, cursor);
         if let Some(hover) = &self.hover {
             rows.push(Line::raw(""));
-            rows.open(
+            // Folded by default: the goals and messages matter more in a narrow view.
+            rows.open_as(
                 "hover".into(),
                 Line::styled("At the cursor", theme::current().heading),
+                true,
             );
             hover
                 .iter()

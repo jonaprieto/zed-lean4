@@ -416,6 +416,16 @@ async fn tui_shows_goal_from_real_lean() {
             if opened && hovered(&text) {
                 return;
             }
+            // The hover starts folded; open it once it shows.
+            if let Some(row) = text.lines().position(|l| l == "▸ At the cursor") {
+                effects = app.on_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: 0,
+                    row: row.try_into().unwrap(),
+                    modifiers: KeyModifiers::NONE,
+                });
+                continue;
+            }
             if !clicked && text.contains("⊢ n + 0 = n") {
                 clicked = true;
                 let row = text.lines().position(|l| l.starts_with("n : Nat")).unwrap();

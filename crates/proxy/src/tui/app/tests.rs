@@ -1017,9 +1017,16 @@ fn lazy_children_from_an_older_session_are_released_not_shown() {
 }
 
 #[test]
-fn the_hover_shows_after_the_messages_and_folds() {
+fn the_hover_shows_folded_after_the_messages_and_unfolds() {
     let mut app = app();
     app.reply(lean::HOVER, hover());
+    shows(&app, &["▾ Messages (0)", "", "▸ At the cursor"]);
+    hides(&app, "Adding zero changes nothing.");
+    // The hover's header, above the module section.
+    app.on_key(key('G'));
+    app.on_key(key('k'));
+    app.on_key(key('k'));
+    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     shows(
         &app,
         &[
@@ -1031,13 +1038,6 @@ fn the_hover_shows_after_the_messages_and_folds() {
             "Adding zero changes nothing.",
         ],
     );
-    // The last hover row, above the module section.
-    app.on_key(key('G'));
-    app.on_key(key('k'));
-    app.on_key(key('k'));
-    app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    shows(&app, &["▾ Messages (0)", "", "▸ At the cursor"]);
-    hides(&app, "Adding zero changes nothing.");
 }
 
 #[test]
@@ -1046,7 +1046,7 @@ fn a_null_hover_hides_the_section() {
     app.reply(lean::HOVER, hover());
     app.on_message(&json!({"event":"changedCursorLocation","args":[loc(2, 0)]}));
     app.reply(lean::HOVER, Value::Null);
-    hides(&app, "▾ At the cursor");
+    hides(&app, "At the cursor");
 }
 
 #[test]
