@@ -1050,6 +1050,25 @@ fn a_null_hover_hides_the_section() {
 }
 
 #[test]
+fn a_narrow_footer_wraps_between_keys() {
+    let app = app();
+    let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    let rows: Vec<String> = (8..10)
+        .map(|y| (0..30).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .map(|r| r.trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "q quit  p pin  a all  c copy",
+            "o browser  j/k move  ⏎ fold"
+        ]
+    );
+}
+
+#[test]
 fn file_label_is_the_last_uri_segment() {
     let mut app = Tui::new();
     app.connected("http://h/".into());

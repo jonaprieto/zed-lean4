@@ -8,28 +8,38 @@ use ratatui::{
     widgets::Paragraph,
 };
 use serde_json::Value;
+use unicode_width::UnicodeWidthStr;
 
 use super::{App, file_name};
 use crate::tui::{
     detail, lean, messages,
     screen::{Screen, Wrapped},
     theme,
-    view::{Ops, Row, Rows},
+    view::{Ops, Row, Rows, wrap},
 };
 
 pub(super) const KEYS: &str = "q quit  p pin  a all  c copy  o browser  j/k move  ⏎ fold";
 pub(super) const PICKED_KEYS: &str = "d definition  t type  esc close";
 /// The header's note when Lean asks for the shown file to be restarted.
 const STALE_IMPORTS: &str = "⚠ imports out of date, r restarts";
+/// Screen lines the footer takes at most.
+const FOOTER_HEIGHT: usize = 3;
 
 impl App {
     pub fn render(&self, frame: &mut Frame) {
         let width = frame.area().width;
         let detail = self.picked.as_ref().map_or(vec![], |p| p.lines(width));
+        let keys = if self.picked.is_some() {
+            PICKED_KEYS
+        } else {
+            KEYS
+        };
+        let mut footer_lines = footer(self.status.as_deref().unwrap_or(keys), width.into());
+        footer_lines.truncate(FOOTER_HEIGHT);
         let [body, panel, footer] = Layout::vertical([
             Constraint::Fill(1),
             Constraint::Length(detail::height(&detail)),
-            Constraint::Length(1),
+            Constraint::Length(u16::try_from(footer_lines.len()).unwrap_or(1)),
         ])
         .areas(frame.area());
         let theme = theme::current();
@@ -60,12 +70,7 @@ impl App {
         };
         frame.render_widget(Paragraph::new(lines), body);
         detail::render(frame, panel, detail);
-        let keys = if self.picked.is_some() {
-            PICKED_KEYS
-        } else {
-            KEYS
-        };
-        frame.render_widget(Line::raw(self.status.as_deref().unwrap_or(keys)), footer);
+        frame.render_widget(Paragraph::new(footer_lines), footer);
     }
 
     pub(super) fn rows(&self) -> Rc<Vec<Row>> {
@@ -225,6 +230,26 @@ impl App {
         }
         rows.close();
     }
+}
+
+/// The footer's `text` in lines of `width` columns: entries two spaces
+/// apart stay whole when they fit, and longer ones wrap.
+fn footer(text: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<String> = Vec::new();
+    for entry in text.split("  ") {
+        match lines.last_mut() {
+            Some(line) if line.width() + 2 + entry.width() <= width => {
+                line.push_str("  ");
+                line.push_str(entry);
+            }
+            _ => lines.push(entry.to_owned()),
+        }
+    }
+    lines
+        .into_iter()
+        .flat_map(|line| wrap(Line::raw(line), width, 0))
+        .map(|(line, ..)| line)
+        .collect()
 }
 
 /// A diagnostic's `line:character`, and the head of its row: that position
