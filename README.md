@@ -21,7 +21,8 @@ lean --version
 ### Recommended settings
 
 Lean answers several requests that Zed leaves off by default, and an extension
-cannot turn them on. Add them for Lean files only:
+cannot turn them on. Add them to your Zed `settings.json`, for Lean files
+only:
 
 ```json
 "languages": {
