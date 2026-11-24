@@ -3,7 +3,7 @@ name = "Lean 4 IDE"
 version = "0.5.0"
 schema_version = 1
 description = "Lean 4 support with goal state and terminal and browser infoviews."
-repository = "https://github.com/jonaprieto/zed-lean4"
+repository = "https://github.com/jonaprieto/zed-lean4-ide"
 authors = ["owlx56 <owlx365@gmail.com>", "Jonathan Prieto-Cubides <prieto.jona@gmail.com>"]
 snippets = "snippets/lean 4.json"
 
@@ -28,4 +28,4 @@ path = ["leanprover", "elan", "**"]
 [[capabilities]]
 kind = "download_file"
 host = "github.com"
-path = ["jonaprieto", "zed-lean4", "**"]
+path = ["jonaprieto", "zed-lean4-ide", "**"]

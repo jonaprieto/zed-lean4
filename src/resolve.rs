@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use zed_extension_api::serde_json::Value;
 use zed_extension_api::{Architecture, Os};
 
-pub const PROXY_REPO: &str = "jonaprieto/zed-lean4";
+pub const PROXY_REPO: &str = "jonaprieto/zed-lean4-ide";
 
 /// `lake` arguments for `serve`, honouring `settings.lean_project_dir`.
 pub fn lake_server_args(settings: Option<&Value>, worktree_root: &str) -> Vec<String> {
