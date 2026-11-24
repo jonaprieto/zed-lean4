@@ -848,14 +848,14 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lean4-ide"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "zed_extension_api",
 ]
 
 [[package]]
 name = "lean4-ide-proxy"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
