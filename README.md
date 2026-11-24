@@ -168,7 +168,14 @@ See [HACKING.md](HACKING.md).
 
 ## Credits
 
-Forked from [reuixiy7/zed-lean4](https://github.com/reuixiy7/zed-lean4). The
-grammar is [tree-sitter-lean](https://github.com/jonaprieto/tree-sitter-lean),
+This is a fork of [reuixiy7/zed-lean4](https://github.com/reuixiy7/zed-lean4)
+that takes a different approach to the infoview. Upstream writes the goals to
+`.lake/InfoView.md` and shows them in Zed's Markdown preview, which is a
+perfectly good way to use Lean in Zed. This fork runs the infoview in Zed's
+terminal instead, so it can be interactive: folding sections, clicking a term
+for its type, jumping to definitions, and opening the official infoview in
+the browser for widgets.
+
+The grammar is [tree-sitter-lean](https://github.com/jonaprieto/tree-sitter-lean),
 a fork of [Julian/tree-sitter-lean](https://github.com/Julian/tree-sitter-lean).
 Licensed under [Apache-2.0](LICENSE.txt).
